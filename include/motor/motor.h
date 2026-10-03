@@ -8,7 +8,6 @@ public:
     void begin();
     void arm();
     void cut();
-    void calibrate();
     void write(int fl, int fr, int rl, int rr);
     void mix(int throttle, float rollOut, float pitchOut, float yawOut);
 
