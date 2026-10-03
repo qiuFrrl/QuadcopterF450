@@ -1,4 +1,4 @@
-#include "pid.h"
+#include "pid/pid.h"
 #include <Arduino.h>
 
 float PID::compute(float setpoint, float measured, float rate,
