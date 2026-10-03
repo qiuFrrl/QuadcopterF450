@@ -49,6 +49,3 @@
 
 // -- LOOP --
 #define LOOP_HZ 250 // target loop rate
-
-// -- SERIAL TEST (tanpa glove) --
-#define SERIAL_CONTROL true // false = pakai ESP-NOW
