@@ -13,74 +13,83 @@ IMU imu;
 bool IMU::begin()
 {
     Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(100000); // 100kHz untuk init
+    Wire.setClock(100000);
     delay(100);
 
-    // Auto-detect alamat MPU6050 (0x68 jika AD0 LOW, 0x69 jika AD0 HIGH)
-    uint8_t addrs[] = {0x68, 0x69};
-    bool found = false;
-
-    for (uint8_t a : addrs)
+    // 1. Cek alamat 0x68 lalu 0x69 (persis seperti kode test Anda)
+    Wire.beginTransmission(0x68);
+    if (Wire.endTransmission() == 0)
     {
-        Wire.beginTransmission(a);
-        Wire.write(0x75); // WHO_AM_I
-        if (Wire.endTransmission(false) == 0)
+        mpu_address = 0x68;
+        Serial.println("[IMU] MPU6050 ditemukan di 0x68");
+    }
+    else
+    {
+        Wire.beginTransmission(0x69);
+        if (Wire.endTransmission() == 0)
         {
-            if (Wire.requestFrom((uint8_t)a, (uint8_t)1) == 1)
-            {
-                uint8_t id = Wire.read();
-                Serial.printf("[IMU] Ditemukan pada alamat 0x%02X (WHO_AM_I = 0x%02X)\n", a, id);
-                mpu_address = a;
-                found = true;
-                break;
-            }
+            mpu_address = 0x69;
+            Serial.println("[IMU] MPU6050 ditemukan di 0x69");
+        }
+        else
+        {
+            Serial.println("[IMU ERROR] MPU6050 TIDAK ditemukan!");
+            return false;
         }
     }
 
-    if (!found)
-    {
-        Serial.println("[IMU ERROR] MPU6050 tidak merespon pada 0x68 maupun 0x69!");
-        return false;
-    }
-
-    // Reset PWR_MGMT_1 (Wakeup sensor, internal 8MHz osc)
+    // 2. Wake up MPU6050 (wajib sebelum baca register lain)
     Wire.beginTransmission(mpu_address);
     Wire.write(PWR_MGMT_1);
     Wire.write(0x00);
-    Wire.endTransmission();
-    delay(50);
+    if (Wire.endTransmission() != 0)
+    {
+        Serial.println("[IMU ERROR] Gagal wake up MPU6050!");
+        return false;
+    }
+    delay(100);
 
-    // Config Gyro (±250deg/s)
+    // 3. Verifikasi WHO_AM_I
+    Wire.beginTransmission(mpu_address);
+    Wire.write(0x75);
+    if (Wire.endTransmission(false) == 0)
+    {
+        if (Wire.requestFrom((uint8_t)mpu_address, (uint8_t)1) == 1)
+        {
+            uint8_t id = Wire.read();
+            Serial.printf("[IMU] WHO_AM_I = 0x%02X\n", id);
+        }
+    }
+
+    // 4. Config Gyro (±250deg/s)
     Wire.beginTransmission(mpu_address);
     Wire.write(0x1B);
     Wire.write(0x00);
     Wire.endTransmission();
 
-    // Config Accel (±2g)
+    // 5. Config Accel (±2g)
     Wire.beginTransmission(mpu_address);
     Wire.write(0x1C);
     Wire.write(0x00);
     Wire.endTransmission();
 
-    // Config DLPF ~44Hz
+    // 6. Config DLPF ~44Hz
     Wire.beginTransmission(mpu_address);
     Wire.write(0x1A);
     Wire.write(0x03);
     Wire.endTransmission();
 
-    Wire.setClock(400000); // Fast mode I2C
     return true;
 }
 
 void IMU::readRaw(int16_t &ax, int16_t &ay, int16_t &az,
                   int16_t &gx, int16_t &gy, int16_t &gz)
 {
-    // Baca 14 byte sekaligus (Accel X,Y,Z + Temp + Gyro X,Y,Z) dalam 1 transaksi I2C
     Wire.beginTransmission(mpu_address);
-    Wire.write(ACCEL_XOUT_H);
+    Wire.write(0x3B);
     if (Wire.endTransmission(false) != 0)
     {
-        return; // Mencegah freeze jika I2C terputus
+        return;
     }
 
     if (Wire.requestFrom((uint8_t)mpu_address, (uint8_t)14) == 14)

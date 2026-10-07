@@ -1,15 +1,4 @@
-// ============================================================
-//  MAIN.CPP — Flight Controller Entry Point
-//  Stabilize mode, input via Serial (sementara, sebelum ESP-NOW)
-//
-//  Serial command:
-//    a         → arm
-//    d         → disarm
-//    t<nilai>  → throttle PWM (1000-1800), contoh: t1200
-//    r<nilai>  → roll setpoint deg (-20~20), contoh: r5
-//    p<nilai>  → pitch setpoint deg (-20~20), contoh: p-3
-//    y<nilai>  → yaw rate setpoint (-50~50), contoh: y10
-// ============================================================
+
 
 #include <Arduino.h>
 #include "config.h"
@@ -17,12 +6,12 @@
 #include "motor/motor.h"
 #include "pid/pid.h"
 
-// PID instances
+
 PID pidRoll(ROLL_KP, ROLL_KI, ROLL_KD);
 PID pidPitch(PITCH_KP, PITCH_KI, PITCH_KD);
 PID pidYaw(YAW_KP, YAW_KI, YAW_KD);
 
-// State
+
 bool armed = false;
 int throttle = PWM_IDLE;
 float setRoll = 0;
@@ -32,7 +21,7 @@ float setYaw = 0;
 unsigned long lastUs = 0;
 unsigned long lastLog = 0;
 
-// ── Serial parser ─────────────────────────────────────────
+
 void parseSerial()
 {
   while (Serial.available())
@@ -92,7 +81,6 @@ void parseSerial()
   }
 }
 
-// ── Setup ─────────────────────────────────────────────────
 void setup()
 {
   Serial.begin(115200);
@@ -115,7 +103,7 @@ void setup()
   Serial.println("[READY] ketik 'a' arm, 't1200' throttle");
 }
 
-// ── Loop ──────────────────────────────────────────────────
+
 void loop()
 {
   unsigned long now = micros();
@@ -127,7 +115,6 @@ void loop()
   parseSerial();
   imu.update(dt);
 
-  // Safety: auto-disarm jika terlalu miring
   if (armed && (fabsf(imu.roll) > 60.0f || fabsf(imu.pitch) > 60.0f))
   {
     armed = false;
@@ -142,14 +129,13 @@ void loop()
     return;
   }
 
-  // PID
+
   float rollOut = pidRoll.compute(setRoll, imu.roll, imu.rollRate, dt, 1.0f);
   float pitchOut = pidPitch.compute(setPitch, imu.pitch, imu.pitchRate, dt, 1.0f);
   float yawOut = pidYaw.compute(setYaw, imu.yawRate, imu.yawRate, dt, 0.5f);
 
   motor.mix(throttle, rollOut, pitchOut, yawOut);
-
-  // Log 10Hz
+  
   if (millis() - lastLog > 100)
   {
     lastLog = millis();

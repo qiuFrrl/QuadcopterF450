@@ -10,7 +10,6 @@ public:
 
     PID(float p, float i, float d) : kp(p), ki(i), kd(d) {}
 
-    // rate = gyro rate langsung (lebih smooth dari derivative error)
     float compute(float setpoint, float measured, float rate,
                   float dt, float deadzone = 0.0f);
 
