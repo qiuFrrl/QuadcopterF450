@@ -58,21 +58,53 @@ void Motor::mix(int throttle, float rollOut, float pitchOut, float yawOut)
 
     throttle = min(throttle, THROTTLE_MAX);
 
-    // Quad X motor mixing layout (sesuai referensi FlightController.cpp):
-    // mot1 (FR, CCW) = throttle - roll - pitch - yaw
-    // mot2 (RR, CW)  = throttle - roll + pitch + yaw
-    // mot3 (RL, CCW) = throttle + roll + pitch - yaw
-    // mot4 (FL, CW)  = throttle + roll - pitch + yaw
-    int fr = throttle - (int)rollOut - (int)pitchOut - (int)yawOut;
-    int rr = throttle - (int)rollOut + (int)pitchOut + (int)yawOut;
-    int rl = throttle + (int)rollOut + (int)pitchOut - (int)yawOut;
-    int fl = throttle + (int)rollOut - (int)pitchOut + (int)yawOut;
+    // Quad X motor mixing layout yang benar secara aerodinamika:
+    // M1 (FR, CCW, Pin 25) = Throttle - Roll + Pitch - Yaw
+    // M2 (RR, CW,  Pin 33) = Throttle - Roll - Pitch + Yaw
+    // M3 (RL, CCW, Pin 12) = Throttle + Roll - Pitch - Yaw
+    // M4 (FL, CW,  Pin 27) = Throttle + Roll + Pitch + Yaw
+    int fr = throttle - (int)rollOut + (int)pitchOut - (int)yawOut;
+    int rr = throttle - (int)rollOut - (int)pitchOut + (int)yawOut;
+    int rl = throttle + (int)rollOut - (int)pitchOut - (int)yawOut;
+    int fl = throttle + (int)rollOut + (int)pitchOut + (int)yawOut;
 
-    // Batas minimum PWM_IDLE saat terbang agar motor tidak stall
-    fl = constrain(fl, PWM_IDLE, PWM_MAX);
-    fr = constrain(fr, PWM_IDLE, PWM_MAX);
-    rl = constrain(rl, PWM_IDLE, PWM_MAX);
-    rr = constrain(rr, PWM_IDLE, PWM_MAX);
+    // Batas minimum efektif:
+    // Jika terbang normal (throttle >= PWM_IDLE), batas bawah adalah PWM_IDLE (1170)
+    // agar motor tidak stall di udara dan mempertahankan otoritas gyroscopic.
+    // Jika landing (throttle < PWM_IDLE), batas bawah diturunkan mengikuti throttle
+    // (minimal THROTTLE_CUTOFF) agar thrust berkurang dan drone dapat mendarat.
+    int minPwmFloor = (throttle >= PWM_IDLE) ? PWM_IDLE : max((int)THROTTLE_CUTOFF, throttle - 30);
+
+    // Preservasi otoritas sikap kendali (AirMode Saturation Management)
+    // 1. Jika ada motor yang melampaui batas atas PWM_MAX, turunkan throttle bersama
+    //    agar selisih roll/pitch/yaw tidak terpotong (menghindari flip tak terkendali).
+    int maxM = max(max(fl, fr), max(rl, rr));
+    if (maxM > PWM_MAX)
+    {
+        int excess = maxM - PWM_MAX;
+        fl -= excess;
+        fr -= excess;
+        rl -= excess;
+        rr -= excess;
+    }
+
+    // 2. Jika ada motor di bawah batas bawah efektif, naikkan bersama
+    //    agar motor tidak stall dan mempertahankan redaman gyroscopic.
+    int minM = min(min(fl, fr), min(rl, rr));
+    if (minM < minPwmFloor)
+    {
+        int deficit = minPwmFloor - minM;
+        fl += deficit;
+        fr += deficit;
+        rl += deficit;
+        rr += deficit;
+    }
+
+    // Batas pengaman final
+    fl = constrain(fl, minPwmFloor, PWM_MAX);
+    fr = constrain(fr, minPwmFloor, PWM_MAX);
+    rl = constrain(rl, minPwmFloor, PWM_MAX);
+    rr = constrain(rr, minPwmFloor, PWM_MAX);
 
     write(fl, fr, rl, rr);
 }

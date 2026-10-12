@@ -61,8 +61,9 @@
 #define D_RATE_YAW    0.0f
 
 // -- PID LIMITS --
-#define PID_LIMIT    400.0f
-#define ANGLE_LIMIT  20.0f
+#define PID_LIMIT                400.0f
+#define TARGET_ANGLE_LIMIT       20.0f  // Batas maksimum perintah target sudut (deg)
+#define ATTITUDE_ESTIMATE_LIMIT  85.0f  // Clamping fusi sensor untuk mencegah singularitas matematis
 
 // -- MOTOR LIMITS --
 #define PWM_MIN       1000
@@ -82,8 +83,15 @@
 #define TILT_RAMP_RATE      0.08f  // Faktor smoothing perubahan sudut per loop
 
 // -- ESP-NOW & FAILSAFE SETTINGS --
-#define ESPNOW_WIFI_CHANNEL 1      // Kanal WiFi ESP-NOW
-#define ESPNOW_TIMEOUT_MS   1000   // Failsafe timeout (ms) jika sinyal remote hilang
+#define ESPNOW_WIFI_CHANNEL         1      // Kanal WiFi ESP-NOW
+#define ESPNOW_TIMEOUT_MS           1000   // Failsafe timeout (ms) jika sinyal remote hilang
+#define BUTTON_DEBOUNCE_MS          250    // Debounce waktu minimum antar perintah tombol yang sama (ms)
+#define FAILSAFE_LANDING_TIMEOUT_MS 6000   // Waktu maksimum penurunan throttle failsafe sebelum auto-cut motor (ms)
+#define FAILSAFE_FLOOR_HOLD_MS      2000   // Waktu menahan throttle floor sebelum auto-cut motor (ms)
+
+// -- SENSOR & I2C SAFETY --
+#define I2C_TIMEOUT_MS           5     // Batas timeout bus I2C (ms). Trade-off: >4ms loop tapi jauh lebih baik dari 25ms
+#define MAX_IMU_FAIL_COUNT       5     // Batas toleransi pembacaan gagal berturut-turut sebelum IMU flagged dead
 
 // -- STATE MACHINE & LANDING --
 #define LANDING_THROTTLE_DROP_RATE 2   // Penurunan throttle per loop saat landing (µs/loop, ~500µs/detik)
@@ -108,5 +116,10 @@
 #define COMM_TASK_STACK         4096
 #define COMM_TASK_PRIORITY      2
 
-#define COMMAND_QUEUE_DEPTH     4
+#define COMMAND_QUEUE_DEPTH     8  // Diperbesar agar aman dari burst input
+#define LOG_QUEUE_DEPTH         16 // Queue log event dari Core 1 ke Core 0
 
+// -- KALIBRASI INKREMENTAL --
+#define CAL_TARGET_SAMPLES      2000  // Jumlah sampel kalibrasi
+#define CAL_SAMPLES_PER_LOOP    4     // Sampel per iterasi flight loop (agar tidak blocking)
+#define CAL_MIN_VALID_RATIO     0.5f  // Rasio minimum sampel valid untuk kalibrasi sukses

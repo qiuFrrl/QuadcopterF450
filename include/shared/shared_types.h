@@ -47,7 +47,8 @@ enum DroneCommand : uint8_t
     CMD_THROTTLE_UP   = 20,  // '+' → Naikkan throttle
     CMD_THROTTLE_DN   = 21,  // '-' → Turunkan throttle
     CMD_CALIBRATE     = 22,  // 'c' → Kalibrasi IMU
-    CMD_STATUS        = 23   // '?' → Tampilkan info status
+    CMD_STATUS        = 23,  // '?' → Tampilkan info status
+    CMD_BENCH_TOGGLE  = 24   // 'b' → Toggle perlindungan throttle bench test
 };
 
 inline const char *getDroneCommandName(DroneCommand cmd)
@@ -65,6 +66,7 @@ inline const char *getDroneCommandName(DroneCommand cmd)
     case CMD_THROTTLE_DN:   return "THROTTLE_DN";
     case CMD_CALIBRATE:     return "CALIBRATE";
     case CMD_STATUS:        return "STATUS";
+    case CMD_BENCH_TOGGLE:  return "BENCH_TOGGLE";
     case CMD_NONE:
     default:                return "---";
     }
@@ -74,9 +76,17 @@ inline const char *getDroneCommandName(DroneCommand cmd)
 //  PAKET KOMUNIKASI
 // ================================================================
 
-// Struktur paket biner ESP-NOW (3 bytes)
+// Struktur paket biner ESP-NOW Standar (3 bytes)
 struct __attribute__((packed)) DronePacket
 {
+    uint8_t  command;      // DroneCommand enum
+    uint16_t throttle;     // Nilai throttle (1000 - 1800 µs), 0 = abaikan
+};
+
+// Struktur paket biner ESP-NOW V2 dengan Sequence Number (4 bytes)
+struct __attribute__((packed)) DronePacketV2
+{
+    uint8_t  seq;          // Sequence counter untuk deduplikasi paket
     uint8_t  command;      // DroneCommand enum
     uint16_t throttle;     // Nilai throttle (1000 - 1800 µs), 0 = abaikan
 };
@@ -89,14 +99,44 @@ struct RawPacket
 };
 
 // ================================================================
+//  TELEMETRI & DIAGNOSTIK KINERJA (Snapshot non-blocking dari Core 1)
+// ================================================================
+struct TelemetryData
+{
+    DroneState state;
+    int        throttle;
+    float      targetPitch;
+    float      targetRoll;
+    float      currentPitch;
+    float      currentRoll;
+    float      rollRate;
+    float      pitchRate;
+    float      yawRate;
+    int        motorFL;
+    int        motorFR;
+    int        motorRL;
+    int        motorRR;
+    bool       gestureReady;
+    bool       gestureActive;
+    bool       imuHealthy;
+    uint32_t   loopDurationUs;     // Durasi siklus loop aktual
+    uint32_t   execDurationUs;     // Waktu komputasi aktif di loop
+    uint32_t   maxExecDurationUs;  // Rekor komputasi terpanjang
+    uint32_t   jitterUs;           // Deviasi dari 4000µs
+    uint32_t   deadlineMissCount;  // Jumlah cycle melebihi toleransi deadline
+};
+
+// ================================================================
 //  DATA BERSAMA ANTAR-CORE (Thread-Safe via portMUX spinlock)
 // ================================================================
 struct SharedState
 {
-    uint16_t throttle;         // Throttle dari remote atau serial (µs)
-    uint32_t lastPacketTime;   // millis() terakhir paket diterima
-    bool     hasEverReceived;  // true jika pernah terima paket
-    DroneState droneState;     // State saat ini (diperbarui oleh flightTask)
+    uint16_t      throttle;                 // Throttle dari remote atau serial (µs)
+    uint32_t      lastPacketTime;           // millis() terakhir paket lolos validasi
+    bool          hasEverReceived;          // true jika pernah terima paket valid
+    DroneState    droneState;               // State saat ini (diperbarui oleh flightTask)
+    TelemetryData telemetry;                // Snapshot telemetri & performa
+    bool          benchThrottleEnabled;     // Pengaman: izin kenaikan throttle serial
 };
 
 // Objek sinkronisasi global
@@ -105,3 +145,4 @@ extern SharedState   g_sharedState;
 extern portMUX_TYPE  g_sharedMux;
 extern TaskHandle_t  hFlightTask;
 extern TaskHandle_t  hCommTask;
+

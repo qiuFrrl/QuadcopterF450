@@ -12,7 +12,7 @@
 //  OBJEK SINKRONISASI & TUGAS FREERTOS DUAL-CORE
 // ================================================================
 QueueHandle_t xQueueCommand = NULL;
-SharedState   g_sharedState = {PWM_ARM, 0, false, STATE_DISARMED};
+SharedState   g_sharedState = {PWM_ARM, 0, false, STATE_DISARMED, {}, false};
 portMUX_TYPE  g_sharedMux   = portMUX_INITIALIZER_UNLOCKED;
 
 TaskHandle_t  hFlightTask   = NULL;
@@ -64,11 +64,15 @@ void setup()
     if (xQueueCommand == NULL)
     {
         Serial.println("[FATAL ERROR] Gagal mengalokasikan Command Queue!");
-        while (1);
+        while (1)
+        {
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+            delay(100);
+        }
     }
 
     // 5. Buat Flight Control Task (Core 1, Prioritas 5 — Real-time)
-    xTaskCreatePinnedToCore(
+    BaseType_t resFlight = xTaskCreatePinnedToCore(
         flightTask,
         "FlightTask",
         FLIGHT_TASK_STACK,
@@ -77,9 +81,18 @@ void setup()
         &hFlightTask,
         APP_CPU_NUM // Core 1
     );
+    if (resFlight != pdPASS)
+    {
+        Serial.println("[FATAL ERROR] Gagal mengalokasikan FlightTask pada Core 1!");
+        while (1)
+        {
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+            delay(100);
+        }
+    }
 
     // 6. Buat Communication Task (Core 0, Prioritas 2)
-    xTaskCreatePinnedToCore(
+    BaseType_t resComm = xTaskCreatePinnedToCore(
         commTask,
         "CommTask",
         COMM_TASK_STACK,
@@ -88,6 +101,15 @@ void setup()
         &hCommTask,
         PRO_CPU_NUM // Core 0
     );
+    if (resComm != pdPASS)
+    {
+        Serial.println("[FATAL ERROR] Gagal mengalokasikan CommTask pada Core 0!");
+        while (1)
+        {
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+            delay(100);
+        }
+    }
 
     Serial.println("\n[SISTEM SIAP] Drone berada pada status SAFE DISARMED.");
     Serial.println("=== PANDUAN PENGUJIAN AMAN (BENCH TEST TANPA BALING-BALING) ===");
@@ -96,9 +118,10 @@ void setup()
     Serial.println("  '3'     : BTN_READY (buka 1 sesi pengenalan gesture)");
     Serial.println("  'w/s'   : Gesture MAJU / MUNDUR (tilt target 3° selama 0.5s)");
     Serial.println("  'a/d'   : Gesture KIRI / KANAN (tilt target 3° selama 0.5s)");
-    Serial.println("  '+/-'   : Naikkan / turunkan throttle simulasi (25µs)");
+    Serial.println("  'b'     : Buka / kunci izin kenaikan throttle simulasi serial");
+    Serial.println("  '+/-'   : Naikkan / turunkan throttle simulasi (25µs, jika dibuka)");
     Serial.println("  'c'     : Kalibrasi IMU fisik (hanya saat DISARMED)");
-    Serial.println("  '?'     : Status telemetri ringkas");
+    Serial.println("  '?'     : Cetak laporan diagnostik sistem & performa loop lengkap");
     Serial.println("========================================================\n");
 
     // Hapus Arduino loopTask bawaan untuk menghemat memori

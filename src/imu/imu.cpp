@@ -15,6 +15,7 @@ bool IMU::begin()
 {
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(400000);
+    Wire.setTimeOut(I2C_TIMEOUT_MS);
     delay(100);
 
     // 1. Cek alamat 0x68 / 0x69
@@ -35,6 +36,7 @@ bool IMU::begin()
         else
         {
             Serial.println("[IMU ERROR] MPU6050 TIDAK ditemukan!");
+            _healthy = false;
             return false;
         }
     }
@@ -46,6 +48,7 @@ bool IMU::begin()
     if (Wire.endTransmission() != 0)
     {
         Serial.println("[IMU ERROR] Gagal wake up MPU6050!");
+        _healthy = false;
         return false;
     }
     delay(100);
@@ -54,32 +57,51 @@ bool IMU::begin()
     Wire.beginTransmission(_addr);
     Wire.write(CONFIG_REG);
     Wire.write(0x03);
-    Wire.endTransmission();
+    if (Wire.endTransmission() != 0)
+    {
+        Serial.println("[IMU ERROR] Gagal konfigurasi DLPF!");
+        _healthy = false;
+        return false;
+    }
 
     // 4. Konfigurasi Gyro Full Scale: ±500°/s (0x08) -> 65.5 LSB/(°/s)
     Wire.beginTransmission(_addr);
     Wire.write(GYRO_CONFIG);
     Wire.write(GYRO_SCALE_REG);
-    Wire.endTransmission();
+    if (Wire.endTransmission() != 0)
+    {
+        Serial.println("[IMU ERROR] Gagal konfigurasi Gyro Full Scale!");
+        _healthy = false;
+        return false;
+    }
 
     // 5. Konfigurasi Accel Full Scale: ±8g (0x10) -> 4096 LSB/g
     Wire.beginTransmission(_addr);
     Wire.write(ACCEL_CONFIG);
     Wire.write(ACCEL_SCALE_REG);
-    Wire.endTransmission();
+    if (Wire.endTransmission() != 0)
+    {
+        Serial.println("[IMU ERROR] Gagal konfigurasi Accel Full Scale!");
+        _healthy = false;
+        return false;
+    }
 
+    _healthy = true;
+    _failCount = 0;
     Serial.println("[IMU] MPU6050 terkonfigurasi (Gyro ±500°/s, Accel ±8g)");
     return true;
 }
 
-void IMU::readRaw(int16_t &ax, int16_t &ay, int16_t &az,
+bool IMU::readRaw(int16_t &ax, int16_t &ay, int16_t &az,
                   int16_t &gx, int16_t &gy, int16_t &gz)
 {
+    ax = ay = az = gx = gy = gz = 0;
+
     Wire.beginTransmission(_addr);
     Wire.write(ACCEL_XOUT_H);
     if (Wire.endTransmission(false) != 0)
     {
-        return;
+        return false;
     }
 
     if (Wire.requestFrom((uint8_t)_addr, (uint8_t)14) == 14)
@@ -91,7 +113,10 @@ void IMU::readRaw(int16_t &ax, int16_t &ay, int16_t &az,
         gx = (Wire.read() << 8) | Wire.read();
         gy = (Wire.read() << 8) | Wire.read();
         gz = (Wire.read() << 8) | Wire.read();
+        return true;
     }
+
+    return false;
 }
 
 void IMU::calibrate()
@@ -102,29 +127,38 @@ void IMU::calibrate()
     double ax_sum = 0, ay_sum = 0, az_sum = 0;
     double gx_sum = 0, gy_sum = 0, gz_sum = 0;
     const int samples = 2000;
+    int validSamples = 0;
 
     for (int i = 0; i < samples; i++)
     {
         int16_t ax, ay, az, gx, gy, gz;
-        readRaw(ax, ay, az, gx, gy, gz);
+        if (readRaw(ax, ay, az, gx, gy, gz))
+        {
+            ax_sum += (float)ax / ACCEL_SENSITIVITY;
+            ay_sum += (float)ay / ACCEL_SENSITIVITY;
+            az_sum += (float)az / ACCEL_SENSITIVITY;
 
-        ax_sum += (float)ax / ACCEL_SENSITIVITY;
-        ay_sum += (float)ay / ACCEL_SENSITIVITY;
-        az_sum += (float)az / ACCEL_SENSITIVITY;
-
-        gx_sum += (float)gx / GYRO_SENSITIVITY;
-        gy_sum += (float)gy / GYRO_SENSITIVITY;
-        gz_sum += (float)gz / GYRO_SENSITIVITY;
+            gx_sum += (float)gx / GYRO_SENSITIVITY;
+            gy_sum += (float)gy / GYRO_SENSITIVITY;
+            gz_sum += (float)gz / GYRO_SENSITIVITY;
+            validSamples++;
+        }
 
         delayMicroseconds(1000);
     }
 
-    float calRoll = gx_sum / samples;
-    float calPitch = gy_sum / samples;
-    float calYaw = gz_sum / samples;
-    float calAx = ax_sum / samples;
-    float calAy = ay_sum / samples;
-    float calAz = (az_sum / samples) - 1.0f; // 1.0g gravitasi normal bumi
+    if (validSamples < 1000)
+    {
+        Serial.println("[IMU ERROR] Kalibrasi gagal: terlalu banyak sampel I2C korup!");
+        return;
+    }
+
+    float calRoll  = gx_sum / validSamples;
+    float calPitch = gy_sum / validSamples;
+    float calYaw   = gz_sum / validSamples;
+    float calAx    = ax_sum / validSamples;
+    float calAy    = ay_sum / validSamples;
+    float calAz    = (az_sum / validSamples) - 1.0f; // 1.0g gravitasi normal bumi
 
     Serial.println("[IMU] Kalibrasi selesai! Format untuk config.h:");
     Serial.printf("#define RateCalibrationRoll  %.2ff\n", calRoll);
@@ -139,7 +173,20 @@ void IMU::update(float dt)
 {
     int16_t ax_raw, ay_raw, az_raw;
     int16_t gx_raw, gy_raw, gz_raw;
-    readRaw(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
+
+    if (!readRaw(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw))
+    {
+        _failCount++;
+        if (_failCount >= MAX_IMU_FAIL_COUNT)
+        {
+            _healthy = false;
+        }
+        return; // Jangan memproses nilai sampah jika pembacaan I2C gagal
+    }
+
+    // Pembacaan berhasil
+    _failCount = 0;
+    _healthy = true;
 
     // 1. Konversi ke satuan fisik (deg/s & g)
     float rawRateRoll  = (float)gx_raw / GYRO_SENSITIVITY;
@@ -159,10 +206,18 @@ void IMU::update(float dt)
     accY = rawAccY - AccYCalibration;
     accZ = rawAccZ - AccZCalibration;
 
+    // Proteksi data invalid (NaN / Inf)
+    if (isnan(rollRate) || isnan(pitchRate) || isnan(yawRate) ||
+        isnan(accX)     || isnan(accY)      || isnan(accZ))
+    {
+        _healthy = false;
+        return;
+    }
+
     // 3. Estimasi sudut dari accelerometer (deg)
-    float normRoll = sqrtf(accX * accX + accZ * accZ);
+    float normRoll  = sqrtf(accX * accX + accZ * accZ);
     float normPitch = sqrtf(accY * accY + accZ * accZ);
-    float accelAngleRoll  = (normRoll > 0.001f) ? (atanf(accY / normRoll) * 57.29578f) : 0.0f;
+    float accelAngleRoll  = (normRoll > 0.001f)  ? (atanf(accY / normRoll) * 57.29578f) : 0.0f;
     float accelAnglePitch = (normPitch > 0.001f) ? (-atanf(accX / normPitch) * 57.29578f) : 0.0f;
 
     // 4. Complementary Filter (α = 0.991, 1 - α = 0.009)
@@ -170,7 +225,8 @@ void IMU::update(float dt)
     pitch = CF_ALPHA * (pitch + pitchRate * dt) + (1.0f - CF_ALPHA) * accelAnglePitch;
     yaw  += yawRate * dt;
 
-    // 5. Clamping batas sudut untuk keselamatan
-    roll  = constrain(roll, -ANGLE_LIMIT, ANGLE_LIMIT);
-    pitch = constrain(pitch, -ANGLE_LIMIT, ANGLE_LIMIT);
+    // 5. Clamping batas sudut matematis agar tidak terjadi singularitas,
+    //    tetapi TETAP mempertahankan sudut riil di atas 45° agar auto-cut proteksi kemiringan dapat memicu!
+    roll  = constrain(roll, -ATTITUDE_ESTIMATE_LIMIT, ATTITUDE_ESTIMATE_LIMIT);
+    pitch = constrain(pitch, -ATTITUDE_ESTIMATE_LIMIT, ATTITUDE_ESTIMATE_LIMIT);
 }

@@ -21,13 +21,18 @@ public:
     float yaw = 0.0f;
 
     bool begin();
-    void readRaw(int16_t &ax, int16_t &ay, int16_t &az,
+    bool readRaw(int16_t &ax, int16_t &ay, int16_t &az,
                  int16_t &gx, int16_t &gy, int16_t &gz);
     void update(float dt);
     void calibrate();
 
+    bool isHealthy() const { return _healthy; }
+    uint32_t getFailCount() const { return _failCount; }
+
 private:
-    uint8_t _addr = 0x68;
+    uint8_t  _addr = 0x68;
+    bool     _healthy = false;
+    uint32_t _failCount = 0;
 };
 
 extern IMU imu;

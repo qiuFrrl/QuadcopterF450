@@ -24,11 +24,14 @@ static int   currentThrottle       = PWM_ARM;
 // Sesi pengenalan gesture satu langkah (READY -> 1 Gerakan -> Netral)
 static bool     gestureReady       = false;  // True setelah tombol READY ditekan
 static bool     gestureActive      = false;  // True saat gesture sedang dieksekusi
-static uint32_t gestureStartTime   = 0;      // Waktu mulai gesture step
-
-// Controlled landing tracking
+static uint32_t gestureStartTime   = 0;      // Waktu mulai gesture step// Controlled landing tracking
 static int      landingThrottle    = PWM_IDLE;
-static uint32_t lastTelemetry      = 0;
+static uint32_t landingStartTime   = 0;
+static uint32_t floorHoldStartTime = 0;
+
+// Diagnostik Flight Control Loop
+static uint32_t maxExecDurationUs  = 0;
+static uint32_t deadlineMissCount  = 0;
 
 // ================================================================
 //  KONTROL GERAKAN SATU LANGKAH (TILT TARGET 2-3 DERAJAT)
@@ -73,10 +76,11 @@ static void idle()
 // ================================================================
 static bool safetyCheckPass(const SharedState &local)
 {
-    // 1. IMU harus valid dan drone berada pada posisi rata (< 30 derajat)
-    if (isnan(imu.roll) || isnan(imu.pitch) || abs(imu.roll) > 30.0f || abs(imu.pitch) > 30.0f)
+    // 1. IMU harus sehat, bukan NaN, dan drone berada pada posisi rata (< 30 derajat)
+    if (!imu.isHealthy() || isnan(imu.roll) || isnan(imu.pitch) ||
+        abs(imu.roll) > 30.0f || abs(imu.pitch) > 30.0f)
     {
-        Serial.println("[SAFETY] GAGAL: Drone tidak rata atau data sensor invalid! Ratakan drone sebelum ARM.");
+        Serial.println("[SAFETY] GAGAL: Sensor IMU tidak sehat atau drone miring (>30°)! Ratakan drone sebelum ARM.");
         return false;
     }
 
@@ -88,10 +92,11 @@ static bool safetyCheckPass(const SharedState &local)
         return false;
     }
 
-    // 3. Throttle harus di posisi minimum / aman
-    if (currentThrottle > PWM_IDLE + 50)
+    // 3. Throttle fisik remote harus di posisi aman (minimum)
+    if (local.throttle > PWM_IDLE + 50)
     {
-        Serial.println("[SAFETY] GAGAL: Throttle terlalu tinggi! Turunkan throttle dulu.");
+        Serial.printf("[SAFETY] GAGAL: Throttle remote (%d µs) terlalu tinggi! Turunkan throttle ke minimum sebelum ARM.\n",
+                      local.throttle);
         return false;
     }
 
@@ -113,9 +118,13 @@ static void transitionTo(DroneState newState)
     {
     case STATE_DISARMED:
         idle();
+        smoothPitch = 0.0f;
+        smoothRoll = 0.0f;
         gestureReady = false;
         gestureActive = false;
         currentThrottle = PWM_ARM;
+        landingStartTime = 0;
+        floorHoldStartTime = 0;
         controller.reset();
         motor.cut();
         digitalWrite(LED_PIN, HIGH); // LED solid = DISARMED (aman)
@@ -124,9 +133,13 @@ static void transitionTo(DroneState newState)
 
     case STATE_ARMED:
         idle();
+        smoothPitch = 0.0f;
+        smoothRoll = 0.0f;
         gestureReady = false;
         gestureActive = false;
         currentThrottle = PWM_IDLE;
+        landingStartTime = 0;
+        floorHoldStartTime = 0;
         controller.reset();
         digitalWrite(LED_PIN, LOW); // LED mati = ARMED
         Serial.println("[STATUS] Motor ARMED (idle floor). Naikkan throttle untuk terbang.");
@@ -136,6 +149,8 @@ static void transitionTo(DroneState newState)
         idle();
         gestureReady = false;
         gestureActive = false;
+        landingStartTime = 0;
+        floorHoldStartTime = 0;
         Serial.println("[STATUS] FLYING. Siap menerima satu gesture via tombol READY.");
         break;
 
@@ -144,15 +159,18 @@ static void transitionTo(DroneState newState)
         gestureReady = false;
         gestureActive = false;
         landingThrottle = currentThrottle;
+        landingStartTime = millis();
+        floorHoldStartTime = 0;
         Serial.println("[STATUS] Controlled Landing dimulai. Throttle diturunkan bertahap.");
-        Serial.println("[PERINGATAN] Tanpa sensor ketinggian, ini BUKAN pendaratan otomatis terjamin.");
-        Serial.println("[STATUS] Tekan BTN_ARM_LAND lagi untuk KONFIRMASI MANUAL setelah menyentuh tanah!");
+        Serial.println("[STATUS] Tekan BTN_ARM_LAND untuk KONFIRMASI MANUAL setelah menyentuh tanah.");
         break;
 
     case STATE_EMERGENCY:
         idle();
         gestureReady = false;
         gestureActive = false;
+        landingStartTime = 0;
+        floorHoldStartTime = 0;
         controller.reset();
         motor.cut();
         currentThrottle = PWM_ARM;
@@ -178,28 +196,37 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local)
     }
 
     // ────────────────────────────────────────────────────────────
-    //  2. LOCAL SAFETY CHECK: Auto-cut jika orientasi ekstrim (> 45°)
+    //  2. LOCAL SAFETY CHECK: Auto-cut jika orientasi ekstrim (> 45°) atau IMU mati
     // ────────────────────────────────────────────────────────────
     if (droneState == STATE_FLYING || droneState == STATE_LANDING || droneState == STATE_ARMED)
     {
-        if (isnan(imu.roll) || isnan(imu.pitch) ||
+        if (!imu.isHealthy() || isnan(imu.roll) || isnan(imu.pitch) ||
             abs(imu.roll) > IMU_MAX_TILT_ANGLE || abs(imu.pitch) > IMU_MAX_TILT_ANGLE)
         {
-            Serial.println("[SAFETY] Sudut melebihi 45° atau sensor invalid! Emergency auto-cut!");
+            Serial.println("[SAFETY] Sudut melebihi 45° atau sensor IMU rusak! Emergency auto-cut!");
             transitionTo(STATE_EMERGENCY);
             return;
         }
     }
 
     // ────────────────────────────────────────────────────────────
-    //  3. LOCAL FAILSAFE: Koneksi putus saat terbang
+    //  3. LOCAL FAILSAFE: Koneksi putus
     // ────────────────────────────────────────────────────────────
     bool connected = local.hasEverReceived && ((millis() - local.lastPacketTime) < ESPNOW_TIMEOUT_MS);
-    if ((droneState == STATE_FLYING || droneState == STATE_ARMED) && !connected)
+    if (!connected)
     {
-        Serial.println("[FAILSAFE] Sinyal controller terputus! Mengaktifkan controlled landing...");
-        transitionTo(STATE_LANDING);
-        return;
+        if (droneState == STATE_ARMED)
+        {
+            Serial.println("[FAILSAFE] Sinyal controller terputus saat ARMED! Motor dimatikan.");
+            transitionTo(STATE_DISARMED);
+            return;
+        }
+        else if (droneState == STATE_FLYING)
+        {
+            Serial.println("[FAILSAFE] Sinyal controller terputus saat FLYING! Mengaktifkan controlled landing...");
+            transitionTo(STATE_LANDING);
+            return;
+        }
     }
 
     // ────────────────────────────────────────────────────────────
@@ -210,7 +237,7 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local)
         if (droneState != STATE_DISARMED && droneState != STATE_EMERGENCY && droneState != STATE_LANDING)
         {
             currentThrottle = min(currentThrottle + 25, THROTTLE_MAX);
-            Serial.printf("[THROTTLE] %d µs\n", currentThrottle);
+            Serial.printf("[THROTTLE BENCH] %d µs\n", currentThrottle);
         }
         return;
     }
@@ -219,7 +246,7 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local)
         if (droneState != STATE_DISARMED && droneState != STATE_EMERGENCY && droneState != STATE_LANDING)
         {
             currentThrottle = max(currentThrottle - 25, (int)PWM_IDLE);
-            Serial.printf("[THROTTLE] %d µs\n", currentThrottle);
+            Serial.printf("[THROTTLE BENCH] %d µs\n", currentThrottle);
         }
         return;
     }
@@ -234,14 +261,6 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local)
         {
             Serial.println("[IMU] Kalibrasi ditolak: drone harus dalam status DISARMED!");
         }
-        return;
-    }
-    if (cmd == CMD_STATUS)
-    {
-        Serial.printf("[INFO] State=%s Thr=%d Roll=%.1f Pitch=%.1f Ready=%d Active=%d Conn=%d\n",
-                      getDroneStateName(droneState), currentThrottle,
-                      imu.roll, imu.pitch,
-                      gestureReady, gestureActive, connected);
         return;
     }
 
@@ -347,13 +366,30 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local)
                 landingThrottle = LANDING_THROTTLE_FLOOR;
             }
         }
+        else
+        {
+            if (floorHoldStartTime == 0)
+            {
+                floorHoldStartTime = millis();
+            }
+        }
         currentThrottle = landingThrottle;
         idle(); // Target orientasi selalu datar saat landing
 
-        // Tombol 1 saat LANDING -> KONFIRMASI MANUAL bahwa drone telah menyentuh tanah
+        // 1. Tombol 1 saat LANDING -> KONFIRMASI MANUAL bahwa drone telah menyentuh tanah
         if (cmd == CMD_BTN_ARM_LAND)
         {
             Serial.println("[CONFIRM] Pilot konfirmasi: drone sudah di tanah. Motor dimatikan.");
+            transitionTo(STATE_DISARMED);
+            break;
+        }
+
+        // 2. FAILSAFE AUTO-CUTOFF: Jika tidak ada konfirmasi manual atau sinyal hilang,
+        // matikan motor setelah menahan floor atau batas waktu landing habis
+        if ((floorHoldStartTime > 0 && (millis() - floorHoldStartTime >= FAILSAFE_FLOOR_HOLD_MS)) ||
+            (landingStartTime > 0 && (millis() - landingStartTime >= FAILSAFE_LANDING_TIMEOUT_MS)))
+        {
+            Serial.println("[FAILSAFE] Batas waktu pendaratan selesai. Motor dimatikan otomatis.");
             transitionTo(STATE_DISARMED);
         }
         break;
@@ -382,30 +418,27 @@ void flightTask(void *pvParameters)
 
     for (;;)
     {
-        // 1. Timing ketat 250Hz (4000µs)
-        while ((micros() - lastLoopMicros) < LOOP_TIME_US)
-        {
-            uint32_t elapsed = micros() - lastLoopMicros;
-            if (LOOP_TIME_US > elapsed && (LOOP_TIME_US - elapsed) > 1500)
-            {
-                vTaskDelay(pdMS_TO_TICKS(1));
-            }
-        }
+        uint32_t loopStart = micros();
+        uint32_t loopDurationUs = loopStart - lastLoopMicros;
+        lastLoopMicros = loopStart;
 
-        uint32_t nowMicros = micros();
-        float dt = (nowMicros - lastLoopMicros) * 1e-6f;
-        lastLoopMicros = nowMicros;
-
+        float dt = loopDurationUs * 1e-6f;
         if (dt <= 0.0f || dt > 0.05f)
         {
             dt = LOOP_TIME_S;
         }
 
-        // 2. Ambil perintah diskrit dari queue (non-blocking)
+        uint32_t jitter = (loopDurationUs > LOOP_TIME_US) ? (loopDurationUs - LOOP_TIME_US) : (LOOP_TIME_US - loopDurationUs);
+        if (loopDurationUs > (LOOP_TIME_US + 500))
+        {
+            deadlineMissCount++;
+        }
+
+        // 1. Ambil perintah diskrit dari queue (non-blocking)
         DroneCommand cmd = CMD_NONE;
         xQueueReceive(xQueueCommand, &cmd, 0);
 
-        // 3. Salin snapshot data bersama secara atomik via spinlock (< 1µs)
+        // 2. Salin snapshot data bersama secara atomik via spinlock (< 1µs)
         SharedState localShared;
         portENTER_CRITICAL(&g_sharedMux);
         localShared = g_sharedState;
@@ -421,17 +454,21 @@ void flightTask(void *pvParameters)
             }
         }
 
-        // 4. Proses State Machine, Safety & Failsafe lokal
-        processStateMachine(cmd, localShared);
-
-        // 5. Update sensor IMU (MPU6050)
+        // 3. Update sensor IMU (MPU6050) dengan pembacaan fisik terbaru
         imu.update(dt);
 
-        // 6. Haluskan target kemiringan (Ramping)
+        // 4. Proses State Machine, Safety & Failsafe lokal dengan data sensor terkini
+        processStateMachine(cmd, localShared);
+
+        // 5. Haluskan target kemiringan (Ramping)
         smoothPitch += (targetAnglePitch - smoothPitch) * TILT_RAMP_RATE;
         smoothRoll  += (targetAngleRoll  - smoothRoll)  * TILT_RAMP_RATE;
 
-        // 7. Hitung koreksi Cascade PID & Mixer Motor ESC
+        // Batasi target sudut demi keselamatan
+        smoothPitch = constrain(smoothPitch, -TARGET_ANGLE_LIMIT, TARGET_ANGLE_LIMIT);
+        smoothRoll  = constrain(smoothRoll,  -TARGET_ANGLE_LIMIT, TARGET_ANGLE_LIMIT);
+
+        // 6. Hitung koreksi Cascade PID & Mixer Motor ESC
         bool motorsActive = (droneState == STATE_ARMED ||
                              droneState == STATE_FLYING ||
                              droneState == STATE_LANDING);
@@ -456,18 +493,53 @@ void flightTask(void *pvParameters)
                       controller.outYaw);
         }
 
-        // 8. Telemetri setiap 50ms (20Hz)
-        if (millis() - lastTelemetry >= 50)
+        // 7. Ukur durasi komputasi
+        uint32_t compEnd = micros();
+        uint32_t execDurationUs = compEnd - loopStart;
+        if (execDurationUs > maxExecDurationUs)
         {
-            lastTelemetry = millis();
-            Serial.printf("[%s | Thr:%4d] Tgt(P:%+4.1f R:%+4.1f) IMU(P:%+4.1f R:%+4.1f) Mot(%4d %4d %4d %4d)%s%s\n",
-                          getDroneStateName(droneState),
-                          throttleInput,
-                          smoothPitch, smoothRoll,
-                          imu.pitch, imu.roll,
-                          motor.getFL(), motor.getFR(), motor.getRL(), motor.getRR(),
-                          gestureReady  ? " [READY]"  : "",
-                          gestureActive ? " [GESTURE]" : "");
+            maxExecDurationUs = execDurationUs;
+        }
+
+        // 8. Kirim paket telemetri non-blocking ke shared state untuk dicetak Core 0
+        TelemetryData telem;
+        telem.state             = droneState;
+        telem.throttle          = throttleInput;
+        telem.targetPitch       = smoothPitch;
+        telem.targetRoll        = smoothRoll;
+        telem.currentPitch      = imu.pitch;
+        telem.currentRoll       = imu.roll;
+        telem.rollRate          = imu.rollRate;
+        telem.pitchRate         = imu.pitchRate;
+        telem.yawRate           = imu.yawRate;
+        telem.motorFL           = motor.getFL();
+        telem.motorFR           = motor.getFR();
+        telem.motorRL           = motor.getRL();
+        telem.motorRR           = motor.getRR();
+        telem.gestureReady      = gestureReady;
+        telem.gestureActive     = gestureActive;
+        telem.imuHealthy        = imu.isHealthy();
+        telem.loopDurationUs    = loopDurationUs;
+        telem.execDurationUs    = execDurationUs;
+        telem.maxExecDurationUs = maxExecDurationUs;
+        telem.jitterUs          = jitter;
+        telem.deadlineMissCount = deadlineMissCount;
+
+        portENTER_CRITICAL(&g_sharedMux);
+        g_sharedState.telemetry  = telem;
+        g_sharedState.droneState = droneState;
+        portEXIT_CRITICAL(&g_sharedMux);
+
+        // 9. Precision Timing 250Hz (4000µs)
+        while ((micros() - loopStart) < LOOP_TIME_US)
+        {
+            uint32_t remaining = LOOP_TIME_US - (micros() - loopStart);
+            if (remaining > 2000)
+            {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
         }
     }
 }
+
+

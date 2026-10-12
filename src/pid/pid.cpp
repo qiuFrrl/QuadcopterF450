@@ -7,14 +7,22 @@ float PID::compute(float error, float dt)
 {
     float pterm = kp * error;
 
-    // Integrasi trapesium sesuai referensi FlightController
-    iterm += ki * (error + prevError) * (dt * 0.5f);
-    iterm = constrain(iterm, -iLimit, iLimit);
-
     float dterm = 0.0f;
     if (dt > 0.00001f)
     {
         dterm = kd * ((error - prevError) / dt);
+    }
+
+    // Clamping Anti-Windup: Hanya integrasikan jika output belum jenuh
+    // atau jika arah perubahan error mengembalikan output ke daerah linier.
+    float prospectiveOut = pterm + iterm + dterm;
+    bool saturatedHigh = (prospectiveOut >= outLimit && error > 0);
+    bool saturatedLow  = (prospectiveOut <= -outLimit && error < 0);
+
+    if (!saturatedHigh && !saturatedLow)
+    {
+        iterm += ki * (error + prevError) * (dt * 0.5f);
+        iterm = constrain(iterm, -iLimit, iLimit);
     }
 
     float output = pterm + iterm + dterm;

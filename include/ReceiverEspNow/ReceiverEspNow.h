@@ -22,6 +22,9 @@ public:
 private:
     static volatile RawPacket _rawPacket;
     static volatile bool      _hasNewRawPacket;
+    static portMUX_TYPE       _rawMux;
+    static uint8_t            _lastSeq;
+    static bool               _hasLastSeq;
 };
 
 extern ReceiverEspNow receiver;
