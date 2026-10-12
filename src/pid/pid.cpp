@@ -1,29 +1,74 @@
 #include "pid/pid.h"
 #include <Arduino.h>
 
-float PID::compute(float setpoint, float measured, float rate,
-                   float dt, float deadzone)
-{
-    float err = setpoint - measured;
+CascadeController controller;
 
-    if (fabsf(err) < deadzone)
+float PID::compute(float error, float dt)
+{
+    float pterm = kp * error;
+
+    // Integrasi trapesium sesuai referensi FlightController
+    iterm += ki * (error + prevError) * (dt * 0.5f);
+    iterm = constrain(iterm, -iLimit, iLimit);
+
+    float dterm = 0.0f;
+    if (dt > 0.00001f)
     {
-        err = 0;
-        integral = 0;
+        dterm = kd * ((error - prevError) / dt);
     }
 
-    integral += err * dt;
-    integral = constrain(integral, -iLimit, iLimit);
+    float output = pterm + iterm + dterm;
+    output = constrain(output, -outLimit, outLimit);
 
-    // Derivative: pakai gyro rate langsung (D-on-measurement)
-    float derivative = -rate;
-
-    prevErr = err;
-    return kp * err + ki * integral + kd * derivative;
+    prevError = error;
+    return output;
 }
 
 void PID::reset()
 {
-    integral = 0;
-    prevErr = 0;
+    prevError = 0.0f;
+    iterm = 0.0f;
+}
+
+CascadeController::CascadeController()
+    : angleRoll(P_ANGLE_ROLL, I_ANGLE_ROLL, D_ANGLE_ROLL, PID_LIMIT),
+      anglePitch(P_ANGLE_PITCH, I_ANGLE_PITCH, D_ANGLE_PITCH, PID_LIMIT),
+      rateRoll(P_RATE_ROLL, I_RATE_ROLL, D_RATE_ROLL, PID_LIMIT),
+      ratePitch(P_RATE_PITCH, I_RATE_PITCH, D_RATE_PITCH, PID_LIMIT),
+      rateYaw(P_RATE_YAW, I_RATE_YAW, D_RATE_YAW, PID_LIMIT)
+{
+}
+
+void CascadeController::update(float targetAngleRoll, float targetAnglePitch, float targetRateYaw,
+                                float measuredAngleRoll, float measuredAnglePitch,
+                                float measuredRateRoll, float measuredRatePitch, float measuredRateYaw,
+                                float dt)
+{
+    // 1. Outer Loop (Angle Error -> Desired Angular Rate)
+    float errAngleRoll  = targetAngleRoll  - measuredAngleRoll;
+    float errAnglePitch = targetAnglePitch - measuredAnglePitch;
+
+    float desiredRateRoll  = angleRoll.compute(errAngleRoll, dt);
+    float desiredRatePitch = anglePitch.compute(errAnglePitch, dt);
+
+    // 2. Inner Loop (Angular Rate Error -> Motor Correction)
+    float errRateRoll  = desiredRateRoll  - measuredRateRoll;
+    float errRatePitch = desiredRatePitch - measuredRatePitch;
+    float errRateYaw   = targetRateYaw    - measuredRateYaw;
+
+    outRoll  = rateRoll.compute(errRateRoll, dt);
+    outPitch = ratePitch.compute(errRatePitch, dt);
+    outYaw   = rateYaw.compute(errRateYaw, dt);
+}
+
+void CascadeController::reset()
+{
+    angleRoll.reset();
+    anglePitch.reset();
+    rateRoll.reset();
+    ratePitch.reset();
+    rateYaw.reset();
+    outRoll = 0.0f;
+    outPitch = 0.0f;
+    outYaw = 0.0f;
 }

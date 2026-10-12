@@ -4,23 +4,24 @@
 #include "imu/imu.h"
 
 #define PWR_MGMT_1   0x6B
+#define CONFIG_REG   0x1A
+#define GYRO_CONFIG  0x1B
+#define ACCEL_CONFIG 0x1C
 #define ACCEL_XOUT_H 0x3B
-
-static uint8_t mpu_address = 0x68;
 
 IMU imu;
 
 bool IMU::begin()
 {
     Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(100000);
+    Wire.setClock(400000);
     delay(100);
 
-    // 1. Cek alamat 0x68 lalu 0x69 (persis seperti kode test Anda)
+    // 1. Cek alamat 0x68 / 0x69
     Wire.beginTransmission(0x68);
     if (Wire.endTransmission() == 0)
     {
-        mpu_address = 0x68;
+        _addr = 0x68;
         Serial.println("[IMU] MPU6050 ditemukan di 0x68");
     }
     else
@@ -28,7 +29,7 @@ bool IMU::begin()
         Wire.beginTransmission(0x69);
         if (Wire.endTransmission() == 0)
         {
-            mpu_address = 0x69;
+            _addr = 0x69;
             Serial.println("[IMU] MPU6050 ditemukan di 0x69");
         }
         else
@@ -38,8 +39,8 @@ bool IMU::begin()
         }
     }
 
-    // 2. Wake up MPU6050 (wajib sebelum baca register lain)
-    Wire.beginTransmission(mpu_address);
+    // 2. Wake up MPU6050
+    Wire.beginTransmission(_addr);
     Wire.write(PWR_MGMT_1);
     Wire.write(0x00);
     if (Wire.endTransmission() != 0)
@@ -49,93 +50,127 @@ bool IMU::begin()
     }
     delay(100);
 
-    // 3. Verifikasi WHO_AM_I
-    Wire.beginTransmission(mpu_address);
-    Wire.write(0x75);
-    if (Wire.endTransmission(false) == 0)
-    {
-        if (Wire.requestFrom((uint8_t)mpu_address, (uint8_t)1) == 1)
-        {
-            uint8_t id = Wire.read();
-            Serial.printf("[IMU] WHO_AM_I = 0x%02X\n", id);
-        }
-    }
-
-    // 4. Config Gyro (±250deg/s)
-    Wire.beginTransmission(mpu_address);
-    Wire.write(0x1B);
-    Wire.write(0x00);
-    Wire.endTransmission();
-
-    // 5. Config Accel (±2g)
-    Wire.beginTransmission(mpu_address);
-    Wire.write(0x1C);
-    Wire.write(0x00);
-    Wire.endTransmission();
-
-    // 6. Config DLPF ~44Hz
-    Wire.beginTransmission(mpu_address);
-    Wire.write(0x1A);
+    // 3. Konfigurasi DLPF (~44Hz / 0x03)
+    Wire.beginTransmission(_addr);
+    Wire.write(CONFIG_REG);
     Wire.write(0x03);
     Wire.endTransmission();
 
+    // 4. Konfigurasi Gyro Full Scale: ±500°/s (0x08) -> 65.5 LSB/(°/s)
+    Wire.beginTransmission(_addr);
+    Wire.write(GYRO_CONFIG);
+    Wire.write(GYRO_SCALE_REG);
+    Wire.endTransmission();
+
+    // 5. Konfigurasi Accel Full Scale: ±8g (0x10) -> 4096 LSB/g
+    Wire.beginTransmission(_addr);
+    Wire.write(ACCEL_CONFIG);
+    Wire.write(ACCEL_SCALE_REG);
+    Wire.endTransmission();
+
+    Serial.println("[IMU] MPU6050 terkonfigurasi (Gyro ±500°/s, Accel ±8g)");
     return true;
 }
 
 void IMU::readRaw(int16_t &ax, int16_t &ay, int16_t &az,
                   int16_t &gx, int16_t &gy, int16_t &gz)
 {
-    Wire.beginTransmission(mpu_address);
-    Wire.write(0x3B);
+    Wire.beginTransmission(_addr);
+    Wire.write(ACCEL_XOUT_H);
     if (Wire.endTransmission(false) != 0)
     {
         return;
     }
 
-    if (Wire.requestFrom((uint8_t)mpu_address, (uint8_t)14) == 14)
+    if (Wire.requestFrom((uint8_t)_addr, (uint8_t)14) == 14)
     {
         ax = (Wire.read() << 8) | Wire.read();
         ay = (Wire.read() << 8) | Wire.read();
         az = (Wire.read() << 8) | Wire.read();
-        Wire.read(); Wire.read(); // Skip temp (2 byte)
+        Wire.read(); Wire.read(); // Skip temperature (2 byte)
         gx = (Wire.read() << 8) | Wire.read();
         gy = (Wire.read() << 8) | Wire.read();
         gz = (Wire.read() << 8) | Wire.read();
     }
 }
 
+void IMU::calibrate()
+{
+    Serial.println("[IMU] Mengukur offset fisik gyro & accelerometer (2000 sampel)...");
+    Serial.println("[IMU] Pastikan drone berada pada permukaan datar dan diam!");
+
+    double ax_sum = 0, ay_sum = 0, az_sum = 0;
+    double gx_sum = 0, gy_sum = 0, gz_sum = 0;
+    const int samples = 2000;
+
+    for (int i = 0; i < samples; i++)
+    {
+        int16_t ax, ay, az, gx, gy, gz;
+        readRaw(ax, ay, az, gx, gy, gz);
+
+        ax_sum += (float)ax / ACCEL_SENSITIVITY;
+        ay_sum += (float)ay / ACCEL_SENSITIVITY;
+        az_sum += (float)az / ACCEL_SENSITIVITY;
+
+        gx_sum += (float)gx / GYRO_SENSITIVITY;
+        gy_sum += (float)gy / GYRO_SENSITIVITY;
+        gz_sum += (float)gz / GYRO_SENSITIVITY;
+
+        delayMicroseconds(1000);
+    }
+
+    float calRoll = gx_sum / samples;
+    float calPitch = gy_sum / samples;
+    float calYaw = gz_sum / samples;
+    float calAx = ax_sum / samples;
+    float calAy = ay_sum / samples;
+    float calAz = (az_sum / samples) - 1.0f; // 1.0g gravitasi normal bumi
+
+    Serial.println("[IMU] Kalibrasi selesai! Format untuk config.h:");
+    Serial.printf("#define RateCalibrationRoll  %.2ff\n", calRoll);
+    Serial.printf("#define RateCalibrationPitch %.2ff\n", calPitch);
+    Serial.printf("#define RateCalibrationYaw    %.2ff\n", calYaw);
+    Serial.printf("#define AccXCalibration       %.2ff\n", calAx);
+    Serial.printf("#define AccYCalibration       %.2ff\n", calAy);
+    Serial.printf("#define AccZCalibration       %.2ff\n", calAz);
+}
+
 void IMU::update(float dt)
 {
-    int16_t ax_r, ay_r, az_r, gx_r, gy_r, gz_r;
-    readRaw(ax_r, ay_r, az_r, gx_r, gy_r, gz_r);
+    int16_t ax_raw, ay_raw, az_raw;
+    int16_t gx_raw, gy_raw, gz_raw;
+    readRaw(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
 
-    ax_r -= AX_OFFSET;
-    ay_r -= AY_OFFSET;
-    az_r -= AZ_OFFSET;
-    gx_r -= GX_OFFSET;
-    gy_r -= GY_OFFSET;
-    gz_r -= GZ_OFFSET;
+    // 1. Konversi ke satuan fisik (deg/s & g)
+    float rawRateRoll  = (float)gx_raw / GYRO_SENSITIVITY;
+    float rawRatePitch = (float)gy_raw / GYRO_SENSITIVITY;
+    float rawRateYaw   = (float)gz_raw / GYRO_SENSITIVITY;
 
-    float ax_g = ax_r / 16384.0f;
-    float ay_g = ay_r / 16384.0f;
-    float az_g = az_r / 16384.0f;
-    float gx_d = gx_r / 131.0f;
-    float gy_d = gy_r / 131.0f;
-    float gz_d = gz_r / 131.0f;
+    float rawAccX = (float)ax_raw / ACCEL_SENSITIVITY;
+    float rawAccY = (float)ay_raw / ACCEL_SENSITIVITY;
+    float rawAccZ = (float)az_raw / ACCEL_SENSITIVITY;
 
-    rollRate = gx_d;
-    pitchRate = gy_d;
-    yawRate = gz_d;
+    // 2. Koreksi kalibrasi pada satuan fisik (sesuai FlightController reference)
+    rollRate  = rawRateRoll  - RateCalibrationRoll;
+    pitchRate = rawRatePitch - RateCalibrationPitch;
+    yawRate   = rawRateYaw   - RateCalibrationYaw;
 
-    float aRoll = atan2f(ay_g, az_g) * 180.0f / M_PI;
-    float aPitch = -asinf(ax_g < -1.0f ? -1.0f : ax_g > 1.0f ? 1.0f
-                                                             : ax_g) *
-                   180.0f / M_PI;
+    accX = rawAccX - AccXCalibration;
+    accY = rawAccY - AccYCalibration;
+    accZ = rawAccZ - AccZCalibration;
 
-    roll = CF_ALPHA * (roll + gx_d * dt) + (1.0f - CF_ALPHA) * aRoll;
-    pitch = CF_ALPHA * (pitch + gy_d * dt) + (1.0f - CF_ALPHA) * aPitch;
-    yaw += gz_d * dt;
+    // 3. Estimasi sudut dari accelerometer (deg)
+    float normRoll = sqrtf(accX * accX + accZ * accZ);
+    float normPitch = sqrtf(accY * accY + accZ * accZ);
+    float accelAngleRoll  = (normRoll > 0.001f) ? (atanf(accY / normRoll) * 57.29578f) : 0.0f;
+    float accelAnglePitch = (normPitch > 0.001f) ? (-atanf(accX / normPitch) * 57.29578f) : 0.0f;
 
-    roll -= ROLL_TRIM;
-    pitch -= PITCH_TRIM;
+    // 4. Complementary Filter (α = 0.991, 1 - α = 0.009)
+    roll  = CF_ALPHA * (roll + rollRate * dt)   + (1.0f - CF_ALPHA) * accelAngleRoll;
+    pitch = CF_ALPHA * (pitch + pitchRate * dt) + (1.0f - CF_ALPHA) * accelAnglePitch;
+    yaw  += yawRate * dt;
+
+    // 5. Clamping batas sudut untuk keselamatan
+    roll  = constrain(roll, -ANGLE_LIMIT, ANGLE_LIMIT);
+    pitch = constrain(pitch, -ANGLE_LIMIT, ANGLE_LIMIT);
 }
