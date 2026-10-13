@@ -57,16 +57,17 @@ void Motor::mix(int throttle, float rollOut, float pitchOut, float yawOut)
     }
 
     throttle = min(throttle, THROTTLE_MAX);
+    float pitchMix = pitchOut * PITCH_MIX_SIGN;
 
     // Quad X motor mixing layout yang benar secara aerodinamika:
     // M1 (FR, CCW, Pin 25) = Throttle - Roll + Pitch - Yaw
     // M2 (RR, CW,  Pin 33) = Throttle - Roll - Pitch + Yaw
     // M3 (RL, CCW, Pin 12) = Throttle + Roll - Pitch - Yaw
     // M4 (FL, CW,  Pin 27) = Throttle + Roll + Pitch + Yaw
-    int fr = throttle - (int)rollOut + (int)pitchOut - (int)yawOut;
-    int rr = throttle - (int)rollOut - (int)pitchOut + (int)yawOut;
-    int rl = throttle + (int)rollOut - (int)pitchOut - (int)yawOut;
-    int fl = throttle + (int)rollOut + (int)pitchOut + (int)yawOut;
+    int fr = throttle - (int)rollOut + (int)pitchMix - (int)yawOut;
+    int rr = throttle - (int)rollOut - (int)pitchMix + (int)yawOut;
+    int rl = throttle + (int)rollOut - (int)pitchMix - (int)yawOut;
+    int fl = throttle + (int)rollOut + (int)pitchMix + (int)yawOut;
 
     // Batas minimum efektif:
     // Jika terbang normal (throttle >= PWM_IDLE), batas bawah adalah PWM_IDLE (1170)

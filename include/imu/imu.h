@@ -32,6 +32,7 @@ public:
 private:
     uint8_t  _addr = 0x68;
     bool     _healthy = false;
+    bool     _angleInitialized = false;
     uint32_t _failCount = 0;
 };
 

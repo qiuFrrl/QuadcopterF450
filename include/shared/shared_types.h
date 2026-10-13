@@ -91,7 +91,7 @@ struct __attribute__((packed)) DronePacketV2
     uint16_t throttle;     // Nilai throttle (1000 - 1800 µs), 0 = abaikan
 };
 
-// Raw buffer untuk transfer aman dari ISR ESP-NOW ke commTask (Core 0)
+// Raw buffer untuk transfer aman dari callback ESP-NOW ke commTask (Core 0)
 struct RawPacket
 {
     uint8_t data[32];

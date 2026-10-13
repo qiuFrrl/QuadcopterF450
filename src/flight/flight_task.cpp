@@ -24,8 +24,8 @@ static int   currentThrottle       = PWM_ARM;
 // Sesi pengenalan gesture satu langkah (READY -> 1 Gerakan -> Netral)
 static bool     gestureReady       = false;  // True setelah tombol READY ditekan
 static bool     gestureActive      = false;  // True saat gesture sedang dieksekusi
-static uint32_t gestureStartTime   = 0;      // Waktu mulai gesture step// Controlled landing tracking
-static int      landingThrottle    = PWM_IDLE;
+static uint32_t gestureStartTime   = 0;      // Waktu mulai gesture step
+static float    landingThrottle    = PWM_IDLE;
 static uint32_t landingStartTime   = 0;
 static uint32_t floorHoldStartTime = 0;
 
@@ -184,7 +184,7 @@ static void transitionTo(DroneState newState)
 // ================================================================
 //  PROSES STATE MACHINE & FAILSAFE
 // ================================================================
-static void processStateMachine(DroneCommand cmd, const SharedState &local)
+static void processStateMachine(DroneCommand cmd, const SharedState &local, float dt)
 {
     // ────────────────────────────────────────────────────────────
     //  1. EMERGENCY: Prioritas utama, aktif dari state MANAPUN
@@ -360,7 +360,7 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local)
         // Penurunan throttle secara bertahap
         if (landingThrottle > LANDING_THROTTLE_FLOOR)
         {
-            landingThrottle -= LANDING_THROTTLE_DROP_RATE;
+            landingThrottle -= LANDING_THROTTLE_DROP_PER_SEC * dt;
             if (landingThrottle < LANDING_THROTTLE_FLOOR)
             {
                 landingThrottle = LANDING_THROTTLE_FLOOR;
@@ -373,14 +373,21 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local)
                 floorHoldStartTime = millis();
             }
         }
-        currentThrottle = landingThrottle;
+        currentThrottle = (int)(landingThrottle + 0.5f);
         idle(); // Target orientasi selalu datar saat landing
 
         // 1. Tombol 1 saat LANDING -> KONFIRMASI MANUAL bahwa drone telah menyentuh tanah
         if (cmd == CMD_BTN_ARM_LAND)
         {
-            Serial.println("[CONFIRM] Pilot konfirmasi: drone sudah di tanah. Motor dimatikan.");
-            transitionTo(STATE_DISARMED);
+            if (landingStartTime > 0 && (millis() - landingStartTime >= LANDING_MANUAL_CONFIRM_MIN_MS))
+            {
+                Serial.println("[CONFIRM] Pilot konfirmasi: drone sudah di tanah. Motor dimatikan.");
+                transitionTo(STATE_DISARMED);
+            }
+            else
+            {
+                Serial.println("[LANDING] Konfirmasi manual diabaikan: tunggu minimal 1,5 detik sejak landing dimulai.");
+            }
             break;
         }
 
@@ -445,12 +452,20 @@ void flightTask(void *pvParameters)
         g_sharedState.droneState = droneState; // Bagikan status ke Core 0
         portEXIT_CRITICAL(&g_sharedMux);
 
-        // Update throttle dari remote jika diizinkan oleh state saat ini
-        if (droneState == STATE_ARMED || droneState == STATE_FLYING)
+        // Update throttle dari remote jika diizinkan oleh state saat ini.
+        // Nilai throttle 0 tidak pernah ditulis ke shared state oleh commTask.
+        if (!localShared.benchThrottleEnabled && droneState == STATE_ARMED)
         {
-            if (localShared.throttle >= PWM_IDLE && localShared.throttle <= THROTTLE_MAX)
+            if (localShared.throttle >= PWM_MIN && localShared.throttle <= THROTTLE_MAX)
             {
-                currentThrottle = localShared.throttle;
+                currentThrottle = max((int)localShared.throttle, (int)PWM_IDLE);
+            }
+        }
+        else if (!localShared.benchThrottleEnabled && droneState == STATE_FLYING)
+        {
+            if (localShared.throttle >= PWM_MIN)
+            {
+                currentThrottle = min((int)localShared.throttle, (int)THROTTLE_MAX);
             }
         }
 
@@ -458,7 +473,7 @@ void flightTask(void *pvParameters)
         imu.update(dt);
 
         // 4. Proses State Machine, Safety & Failsafe lokal dengan data sensor terkini
-        processStateMachine(cmd, localShared);
+        processStateMachine(cmd, localShared, dt);
 
         // 5. Haluskan target kemiringan (Ramping)
         smoothPitch += (targetAnglePitch - smoothPitch) * TILT_RAMP_RATE;
@@ -482,15 +497,23 @@ void flightTask(void *pvParameters)
         }
         else
         {
-            controller.update(smoothRoll, smoothPitch, targetRateYaw,
-                              imu.roll, imu.pitch,
-                              imu.rollRate, imu.pitchRate, imu.yawRate,
-                              dt);
+            if (throttleInput < PWM_IDLE + 100)
+            {
+                controller.reset();
+                motor.mix(throttleInput, 0.0f, 0.0f, 0.0f);
+            }
+            else
+            {
+                controller.update(smoothRoll, smoothPitch, targetRateYaw,
+                                  imu.roll, imu.pitch,
+                                  imu.rollRate, imu.pitchRate, imu.yawRate,
+                                  dt);
 
-            motor.mix(throttleInput,
-                      controller.outRoll,
-                      controller.outPitch,
-                      controller.outYaw);
+                motor.mix(throttleInput,
+                          controller.outRoll,
+                          controller.outPitch,
+                          controller.outYaw);
+            }
         }
 
         // 7. Ukur durasi komputasi

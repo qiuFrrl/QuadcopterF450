@@ -8,7 +8,7 @@
 // -- PIN MOTOR ESC --
 #define PIN_FL 27   // Front-Left  (CW)
 #define PIN_FR 25   // Front-Right (CCW)
-#define PIN_RL 12   // Rear-Left   (CCW)
+#define PIN_RL 12   // Rear-Left   (CCW) - GPIO12/MTDI strapping pin; jika boot gagal acak, pindahkan ke GPIO14.
 #define PIN_RR 33   // Rear-Right  (CW)
 
 // -- PIN I2C (MPU6050) --
@@ -27,7 +27,8 @@
 #define ACCEL_SENSITIVITY 4096.0f
 
 // -- MPU6050 KALIBRASI (Satuan Fisik: deg/s & G) --
-// Nilai ini dikurangi SETELAH konversi ke satuan fisik
+// Nilai ini harus diukur ulang dengan perintah 'c' saat drone datar dan diam.
+// Nilai ini dikurangi SETELAH konversi ke satuan fisik.
 #define RateCalibrationRoll  -2.40f
 #define RateCalibrationPitch -2.09f
 #define RateCalibrationYaw    0.83f
@@ -73,20 +74,29 @@
 #define THROTTLE_MAX  1800
 #define THROTTLE_CUTOFF 1030  // throttle di bawah ini = disarmed
 
+// -- MOTOR MIXER --
+// Default +1 mempertahankan perilaku mixer saat ini; -1 mengikuti tanda pitch referensi lama.
+// Tes bench TANPA baling-baling di FLYING:
+// 1) Hidung ditekan ke bawah harus menaikkan RPM motor depan (FL, FR).
+// 2) Gesture MAJU harus menurunkan hidung.
+// Jika salah satu arah tidak sesuai, ubah macro ini ke -1 lalu uji ulang.
+#define PITCH_MIX_SIGN +1
+
 // -- LOOP --
 #define LOOP_HZ 250              // target loop rate (Hz)
 #define LOOP_TIME_US 4000        // 1000000 / 250 = 4000µs
 #define LOOP_TIME_S  0.004f      // 1.0 / 250 = 0.004s
 
 // -- GENTLE TILT SETTINGS (Kontrol Gerakan Halus & Stabil) --
-#define GENTLE_TILT_ANGLE   4.0f   // Sudut kemiringan lembut (derajat) untuk maju/mundur/kiri/kanan
 #define TILT_RAMP_RATE      0.08f  // Faktor smoothing perubahan sudut per loop
 
 // -- ESP-NOW & FAILSAFE SETTINGS --
 #define ESPNOW_WIFI_CHANNEL         1      // Kanal WiFi ESP-NOW
+#define GLOVE_MAC_ADDR              {0x00, 0x00, 0x00, 0x00, 0x00, 0x00} // Isi dengan MAC glove; 00 semua = terima semua paket.
+#define ESPNOW_ALLOW_TEXT_PARSER    0      // 0 = hanya paket biner; 1 = aktifkan parser teks untuk bench/debug.
 #define ESPNOW_TIMEOUT_MS           1000   // Failsafe timeout (ms) jika sinyal remote hilang
-#define BUTTON_DEBOUNCE_MS          250    // Debounce waktu minimum antar perintah tombol yang sama (ms)
-#define FAILSAFE_LANDING_TIMEOUT_MS 6000   // Waktu maksimum penurunan throttle failsafe sebelum auto-cut motor (ms)
+// Timeout landing: ceil((THROTTLE_MAX - LANDING_THROTTLE_FLOOR) / 80us/s * 1000) + 2000ms hold ~= 11375ms.
+#define FAILSAFE_LANDING_TIMEOUT_MS 12000  // Waktu maksimum penurunan throttle failsafe sebelum auto-cut motor (ms)
 #define FAILSAFE_FLOOR_HOLD_MS      2000   // Waktu menahan throttle floor sebelum auto-cut motor (ms)
 
 // -- SENSOR & I2C SAFETY --
@@ -94,8 +104,9 @@
 #define MAX_IMU_FAIL_COUNT       5     // Batas toleransi pembacaan gagal berturut-turut sebelum IMU flagged dead
 
 // -- STATE MACHINE & LANDING --
-#define LANDING_THROTTLE_DROP_RATE 2   // Penurunan throttle per loop saat landing (µs/loop, ~500µs/detik)
+#define LANDING_THROTTLE_DROP_PER_SEC 80.0f // Penurunan throttle saat landing (µs/detik)
 #define LANDING_THROTTLE_FLOOR   1050  // Throttle minimum saat landing sebelum konfirmasi sentuh tanah
+#define LANDING_MANUAL_CONFIRM_MIN_MS 1500 // Tombol konfirmasi landing baru diterima setelah 1,5 detik
 
 // -- GESTURE STEP SETTINGS --
 #define GESTURE_STEP_DURATION_MS  500  // Durasi satu langkah gesture (ms) — 0.5 detik miringkan lalu kembali
@@ -103,23 +114,16 @@
 
 // -- SAFETY --
 #define IMU_MAX_TILT_ANGLE       45.0f // Sudut miring maksimum sebelum emergency auto-cut (derajat)
-#define MOTOR_CUT_DELAY_MS       200   // Delay sebelum motor benar-benar mati saat emergency (debounce)
 
 // -- FREERTOS DUAL-CORE TASK SETTINGS --
 #define FLIGHT_TASK_HZ          250
 #define FLIGHT_TASK_PERIOD_MS   (1000 / FLIGHT_TASK_HZ)  // 4ms
-#define FLIGHT_TASK_STACK       4096
+#define FLIGHT_TASK_STACK       8192
 #define FLIGHT_TASK_PRIORITY    5
 
 #define COMM_TASK_HZ            50
 #define COMM_TASK_PERIOD_MS     (1000 / COMM_TASK_HZ)     // 20ms
-#define COMM_TASK_STACK         4096
+#define COMM_TASK_STACK         8192
 #define COMM_TASK_PRIORITY      2
 
 #define COMMAND_QUEUE_DEPTH     8  // Diperbesar agar aman dari burst input
-#define LOG_QUEUE_DEPTH         16 // Queue log event dari Core 1 ke Core 0
-
-// -- KALIBRASI INKREMENTAL --
-#define CAL_TARGET_SAMPLES      2000  // Jumlah sampel kalibrasi
-#define CAL_SAMPLES_PER_LOOP    4     // Sampel per iterasi flight loop (agar tidak blocking)
-#define CAL_MIN_VALID_RATIO     0.5f  // Rasio minimum sampel valid untuk kalibrasi sukses

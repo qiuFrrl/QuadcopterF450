@@ -1,5 +1,6 @@
 #include "ReceiverEspNow/ReceiverEspNow.h"
 #include <ctype.h>
+#include <string.h>
 
 ReceiverEspNow receiver;
 
@@ -10,28 +11,64 @@ uint8_t            ReceiverEspNow::_lastSeq = 0;
 bool               ReceiverEspNow::_hasLastSeq = false;
 
 // ================================================================
-//  CALLBACK: Data masuk dari ESP-NOW (Core 0 WiFi task / ISR Context)
+//  CALLBACK: Data masuk dari ESP-NOW (Core 0 WiFi task, bukan ISR)
 //  HANYA menyalin raw bytes ke memory secara atomik, tidak memproses apapun
 // ================================================================
 void IRAM_ATTR ReceiverEspNow::onDataRecv(const uint8_t *mac, const uint8_t *data, int len)
 {
     if (len <= 0) return;
 
+    const uint8_t gloveMac[6] = GLOVE_MAC_ADDR;
+    bool macConfigured = false;
+    for (int i = 0; i < 6; i++)
+    {
+        if (gloveMac[i] != 0x00)
+        {
+            macConfigured = true;
+            break;
+        }
+    }
+
+    if (macConfigured && (mac == nullptr || memcmp(mac, gloveMac, 6) != 0))
+    {
+        return;
+    }
+
     int copyLen = (len < (int)sizeof(_rawPacket.data)) ? len : (int)sizeof(_rawPacket.data) - 1;
 
-    portENTER_CRITICAL_ISR(&_rawMux);
+    portENTER_CRITICAL(&_rawMux);
     memcpy((void*)_rawPacket.data, data, copyLen);
     _rawPacket.len = copyLen;
     _hasNewRawPacket = true;
-    portEXIT_CRITICAL_ISR(&_rawMux);
+    portEXIT_CRITICAL(&_rawMux);
 }
 
 bool ReceiverEspNow::begin()
 {
     WiFi.mode(WIFI_STA);
+    esp_err_t channelResult = esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    if (channelResult != ESP_OK)
+    {
+        Serial.printf("[ESP-NOW WARN] Gagal set kanal WiFi %d (err=%d)\n", ESPNOW_WIFI_CHANNEL, channelResult);
+    }
     WiFi.disconnect();
 
     Serial.printf("[ESP-NOW] MAC Address Drone: %s\n", WiFi.macAddress().c_str());
+
+    const uint8_t gloveMac[6] = GLOVE_MAC_ADDR;
+    bool macConfigured = false;
+    for (int i = 0; i < 6; i++)
+    {
+        if (gloveMac[i] != 0x00)
+        {
+            macConfigured = true;
+            break;
+        }
+    }
+    if (!macConfigured)
+    {
+        Serial.println("[ESP-NOW WARN] GLOVE_MAC_ADDR masih 00:00:00:00:00:00; semua pengirim diterima.");
+    }
 
     if (esp_now_init() != ESP_OK)
     {
@@ -127,6 +164,7 @@ bool ReceiverEspNow::processIncomingPacket(DroneCommand &outCmd, uint16_t &outTh
     }
 
     // 3. Format Teks String (untuk uji coba / bench test)
+#if ESPNOW_ALLOW_TEXT_PARSER
     char text[32];
     int copyLen = min(localPacket.len, (int)(sizeof(text) - 1));
     memcpy(text, localPacket.data, copyLen);
@@ -173,4 +211,7 @@ bool ReceiverEspNow::processIncomingPacket(DroneCommand &outCmd, uint16_t &outTh
     }
 
     return true;
+#else
+    return false;
+#endif
 }

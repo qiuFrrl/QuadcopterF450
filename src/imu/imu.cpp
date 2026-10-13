@@ -13,6 +13,8 @@ IMU imu;
 
 bool IMU::begin()
 {
+    _angleInitialized = false;
+
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(400000);
     Wire.setTimeOut(I2C_TIMEOUT_MS);
@@ -167,6 +169,7 @@ void IMU::calibrate()
     Serial.printf("#define AccXCalibration       %.2ff\n", calAx);
     Serial.printf("#define AccYCalibration       %.2ff\n", calAy);
     Serial.printf("#define AccZCalibration       %.2ff\n", calAz);
+    _angleInitialized = false;
 }
 
 void IMU::update(float dt)
@@ -219,6 +222,15 @@ void IMU::update(float dt)
     float normPitch = sqrtf(accY * accY + accZ * accZ);
     float accelAngleRoll  = (normRoll > 0.001f)  ? (atanf(accY / normRoll) * 57.29578f) : 0.0f;
     float accelAnglePitch = (normPitch > 0.001f) ? (-atanf(accX / normPitch) * 57.29578f) : 0.0f;
+
+    if (!_angleInitialized)
+    {
+        roll = constrain(accelAngleRoll, -ATTITUDE_ESTIMATE_LIMIT, ATTITUDE_ESTIMATE_LIMIT);
+        pitch = constrain(accelAnglePitch, -ATTITUDE_ESTIMATE_LIMIT, ATTITUDE_ESTIMATE_LIMIT);
+        yaw = 0.0f;
+        _angleInitialized = true;
+        return;
+    }
 
     // 4. Complementary Filter (α = 0.991, 1 - α = 0.009)
     roll  = CF_ALPHA * (roll + rollRate * dt)   + (1.0f - CF_ALPHA) * accelAngleRoll;

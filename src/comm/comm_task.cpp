@@ -2,7 +2,6 @@
 #include "ReceiverEspNow/ReceiverEspNow.h"
 
 static DroneCommand s_lastEspCmd   = CMD_NONE;
-static uint32_t     s_lastEspCmdMs = 0;
 static uint32_t     s_lastTelemMs  = 0;
 
 static void printDiagnosticReport()
@@ -38,6 +37,9 @@ static void printDiagnosticReport()
                   t.loopDurationUs, t.execDurationUs, t.maxExecDurationUs);
     Serial.printf("  Jitter & Deadlines  : Jitter=%lu µs | Deadline Misses=%lu\n",
                   t.jitterUs, t.deadlineMissCount);
+    Serial.printf("  Stack High Water    : Flight=%lu words | Comm=%lu words\n",
+                  hFlightTask ? (unsigned long)uxTaskGetStackHighWaterMark(hFlightTask) : 0,
+                  hCommTask   ? (unsigned long)uxTaskGetStackHighWaterMark(hCommTask)   : 0);
     Serial.println("==========================================================\n");
 }
 
@@ -176,13 +178,11 @@ void commTask(void *pvParameters)
             }
             else
             {
-                uint32_t now = millis();
-                bool isNewEvent = (espCmd != s_lastEspCmd) || ((now - s_lastEspCmdMs) >= BUTTON_DEBOUNCE_MS);
+                bool isNewEvent = (espCmd != s_lastEspCmd);
 
                 if (isNewEvent)
                 {
                     s_lastEspCmd = espCmd;
-                    s_lastEspCmdMs = now;
 
                     if (xQueueSend(xQueueCommand, &espCmd, 0) != pdPASS)
                     {

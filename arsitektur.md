@@ -68,7 +68,7 @@ graph TB
         Deduplicator["Event Deduplication & Debounce<br/>Rising Edge Detection"]
         SerialOut["Non-Blocking Telemetry Output<br/>(10 Hz Rate Limited)"]
         
-        ISR -->|portENTER_CRITICAL_ISR| RawMux
+        ISR -->|portENTER_CRITICAL| RawMux
         RawMux --> RawBuf
         RawBuf -->|Atomic Snapshot| CommTask
         CommTask --> Deduplicator
@@ -107,9 +107,9 @@ graph TB
 
 #### 1. Core 0 (`commTask`, Prioritas 2)
 * **Tanggung Jawab**:
-  1. Menerima callback paket radio dari stack Wi-Fi ESP-NOW. Callback ini dijalankan pada context Wi-Fi task dan hanya melakukan penyalinan mentah 3–4 byte ke buffer `_rawPacket` di bawah proteksi spinlock `_rawMux`.
-  2. Memvalidasi struktur paket (apakah paket 3-byte `DronePacket` atau paket 4-byte `DronePacketV2` dengan Sequence Number).
-  3. Mencegah eksekusi berulang (*event deduplication*) untuk perintah tombol mekanik (ARM, EMERGENCY, READY). Perintah tombol hanya dikirim ke antrean pada perubahan status (*rising edge*) atau setelah jeda debounce (`BUTTON_DEBOUNCE_MS = 250 ms`).
+  1. Menerima callback paket radio dari stack Wi-Fi ESP-NOW. Callback ini dijalankan pada context Wi-Fi task dan hanya melakukan filter MAC pengirim serta penyalinan mentah 3–4 byte ke buffer `_rawPacket` di bawah proteksi spinlock `_rawMux`.
+  2. Memvalidasi struktur paket (apakah paket 3-byte `DronePacket` atau paket 4-byte `DronePacketV2` dengan Sequence Number). Parser teks hanya aktif bila `ESPNOW_ALLOW_TEXT_PARSER = 1`.
+  3. Mencegah eksekusi berulang (*event deduplication*) untuk perintah tombol mekanik (ARM, EMERGENCY, READY). Perintah tombol hanya dikirim ke antrean pada perubahan status (*rising edge*); paket `CMD_NONE` mereset latch agar penekanan berikutnya dapat diterima.
   4. Menerima input Serial Monitor untuk bench testing yang dilindungi oleh kunci keamanan toggle (`'b'`).
   5. Menangani pencetakan telemetri serial pada frekuensi 10 Hz secara non-blocking sehingga Core 1 tidak pernah tertahan oleh antrean buffer UART.
 
@@ -121,7 +121,7 @@ graph TB
   4. Menyalin data throttle dan timestamp penerimaan paket secara atomik via `g_sharedMux` (< 1 µs).
   5. **Membaca IMU terlebih dahulu (`imu.update(dt)`)**: Membaca MPU6050 dengan batas timeout I2C 5 ms, memperbarui fusi sudut, dan memverifikasi kesehatan sensor secara real-time pada siklus berjalan.
   6. **Mengevaluasi Safety & State Machine**: Memeriksa batas kemiringan darurat ($> 45^\circ$) dan failsafe sinyal dengan data sensor paling segar, serta mereset sudut `smoothPitch` / `smoothRoll` ke 0 saat transisi `DISARMED`/`ARMED`.
-  7. **Menghitung Dua Tahap Kendali Cascade PID**: Dilengkapi integrasi trapesium dan *clamping anti-windup* agar I-term tidak jenuh saat batas aktuator tercapai.
+  7. **Menghitung Dua Tahap Kendali Cascade PID**: Dilengkapi integrasi trapesium, *clamping anti-windup*, dan reset integrator saat throttle rendah (`< PWM_IDLE + 100`) agar I-term tidak menumpuk ketika drone masih di tanah.
   8. **Mendistribusikan Pulsa Mixer Quad-X**: Menjalankan *AirMode saturation management* dengan *dynamic landing floor* sehingga thrust dapat benar-benar turun saat pendaratan tanpa kehilangan otoritas sikap.
   9. Memperbarui struct `TelemetryData` ke memori bersama secara atomik untuk dilaporkan oleh Core 0.
 
@@ -176,7 +176,7 @@ stateDiagram-v2
     state "STATE_DISARMED (0)<br/>Motor: CUT (1000µs)<br/>LED: ON (Solid)" as DISARMED
     state "STATE_ARMED (1)<br/>Motor: IDLE (1170µs)<br/>LED: OFF" as ARMED
     state "STATE_FLYING (2)<br/>Motor: Full PID Control<br/>LED: OFF" as FLYING
-    state "STATE_LANDING (3)<br/>Motor: Auto-Ramp Down (2µs/loop)<br/>LED: OFF" as LANDING
+    state "STATE_LANDING (3)<br/>Motor: Auto-Ramp Down (80µs/detik)<br/>LED: OFF" as LANDING
     state "STATE_EMERGENCY (4)<br/>Motor: CUT (1000µs)<br/>LED: OFF" as EMERGENCY
 
     DISARMED --> ARMED : Perintah BTN_ARM_LAND<br/>[Syarat: Safety Check LULUS]
@@ -188,9 +188,9 @@ stateDiagram-v2
     FLYING --> LANDING : Pilot turunkan throttle <= 1050 µs
     FLYING --> LANDING : Failsafe Timeout<br/>[Sinyal putus saat terbang]
 
-    LANDING --> DISARMED : Perintah BTN_ARM_LAND<br/>[Konfirmasi manual sentuh tanah]
+    LANDING --> DISARMED : Perintah BTN_ARM_LAND<br/>[Konfirmasi manual setelah >= 1,5 detik]
     LANDING --> DISARMED : Failsafe Floor Timeout<br/>[Throttle floor ditahan 2 detik]
-    LANDING --> DISARMED : Failsafe Landing Timeout<br/>[Batas waktu pendaratan 6 detik habis]
+    LANDING --> DISARMED : Failsafe Landing Timeout<br/>[Batas waktu pendaratan 12 detik habis]
 
     DISARMED --> EMERGENCY : Perintah BTN_EMERGENCY
     ARMED --> EMERGENCY : Perintah BTN_EMERGENCY
@@ -220,12 +220,12 @@ Jika drone mengalami benturan keras, terbalik, atau sensor MPU6050 mengalami keg
 
 #### 3. Logika Failsafe & Controlled Landing Tanpa Sensor Ketinggian
 * **Jika Sinyal Hilang saat `ARMED`**: Drone langsung masuk ke `STATE_DISARMED`. Karena drone masih berada di tanah pada putaran idle floor, motor langsung dimatikan tanpa proses pendaratan.
-* **Jika Sinyal Hilang saat `FLYING`**: Drone masuk ke `STATE_LANDING`:
+* **Jika Sinyal Hilang saat `FLYING`**: Drone masuk ke `STATE_LANDING` `[HARDWARE-DEPENDENT / UNTESTED IN FLIGHT]`:
   - Target kemiringan dikunci datar ($0.0^\circ$) dengan PID tetap menstabilkan frame.
-  - Throttle diturunkan bertahap dengan laju $2\text{ µs/loop}$ (~500 µs/detik) menuju dasar landing $1050\text{ µs}$.
+  - Throttle diturunkan bertahap dengan laju $80\text{ µs/detik}$ menuju dasar landing $1050\text{ µs}$.
   - **Failsafe Timer Cutoff**: Karena drone tidak memiliki sensor ketinggian (sonar/barometer/LiDAR), firmware mengaktifkan pengaman waktu:
     1. Jika throttle telah mencapai dasar ($1050\text{ µs}$) dan tertahan selama **2.000 ms** (`FAILSAFE_FLOOR_HOLD_MS`), motor otomatis dimatikan (`STATE_DISARMED`).
-    2. Jika dalam **6.000 ms** (`FAILSAFE_LANDING_TIMEOUT_MS`) pilot tidak menekan konfirmasi manual, motor otomatis dimatikan.
+    2. Jika dalam **12.000 ms** (`FAILSAFE_LANDING_TIMEOUT_MS`) pilot tidak menekan konfirmasi manual, motor otomatis dimatikan. Nilai ini dihitung dari $\lceil(1800 - 1050) / 80 \times 1000\rceil + 2000 \approx 11375\text{ ms}$ lalu dibulatkan ke 12 detik.
 
 ---
 
@@ -239,7 +239,7 @@ Remote pengendali menggunakan 3 tombol fisik dan 1 sensor IMU pendeteksi gestur 
 | `STATE_DISARMED` | **ARM** | `STATE_ARMED` | Menjalankan safety check (sudut datar, remote online, throttle low). |
 | `STATE_ARMED` | **DISARM** | `STATE_DISARMED` | Membatalkan persiapan terbang sebelum throttle dinaikkan. |
 | `STATE_FLYING` | **LAND** | `STATE_LANDING` | Memulai penurunan throttle bertahap. |
-| `STATE_LANDING` | **CONFIRM** | `STATE_DISARMED` | Konfirmasi manual pilot bahwa drone telah mendarat di tanah. |
+| `STATE_LANDING` | **CONFIRM** | `STATE_DISARMED` | Konfirmasi manual pilot bahwa drone telah mendarat di tanah; diterima setelah landing berjalan minimal 1,5 detik. |
 | `STATE_EMERGENCY` | **RESET** | `STATE_DISARMED` | Memulihkan sistem dari kondisi darurat ke kondisi aman. |
 
 ### Mesin Gestur Satu Langkah (Single-Step Gesture Engine)
@@ -299,6 +299,11 @@ struct __attribute__((packed)) DronePacketV2
 };
 ```
 
+### 2. Filter MAC, Kanal WiFi, dan Parser Teks
+ESP-NOW dikunci ke `ESPNOW_WIFI_CHANNEL` saat boot, sehingga kanal drone dan glove harus sama. `GLOVE_MAC_ADDR` dapat diisi dengan MAC ESP32-C3 glove untuk menolak paket dari pengirim lain. Jika nilainya masih placeholder `00:00:00:00:00:00`, firmware menerima semua pengirim dan mencetak satu peringatan saat `receiver.begin()`.
+
+Parser teks lama untuk bench/debug dinonaktifkan default (`ESPNOW_ALLOW_TEXT_PARSER = 0`) agar hanya paket biner yang diterima. Aktifkan macro tersebut ke `1` hanya untuk uji terkontrol.
+
 #### Pemetaan Nilai Enum Command (`DroneCommand`)
 | Nilai Desimal | Identitas Enum | Fungsi Perintah |
 |---|---|---|
@@ -328,6 +333,7 @@ struct __attribute__((packed)) DronePacketV2
 * **DLPF Hardware**: Bandwidth 44 Hz (Register `0x1A = 0x03`).
 * **Skala Pengukuran**: Gyro $\pm 500^\circ/\text{s}$ (65.5 LSB/(°/s)), Accel $\pm 8\text{g}$ (4096 LSB/g).
 * **Proteksi Numerik**: Pengecekan `isnan()` pada seluruh komponen akselerasi dan laju putar sebelum masuk ke fusi komplementer.
+* **Inisialisasi Sudut Awal**: Pada sampel IMU valid pertama, roll/pitch filter komplementer diinisialisasi dari akselerometer agar estimasi tidak mulai dari asumsi 0° yang salah.
 
 ### Formula Fusi Sensor Complementary Filter
 $$\text{Roll}_k = 0.991 \times (\text{Roll}_{k-1} + \text{rollRate} \cdot \Delta t) + 0.009 \times \arctan\left(\frac{\text{accY}}{\sqrt{\text{accX}^2 + \text{accZ}^2}}\right) \times 57.30^\circ$$
@@ -413,17 +419,19 @@ $$\text{Output} = \text{constrain}(P_{\text{term}} + I_{\text{term}} + D_{\text{
           BELAKANG (REAR)
 ```
 
-### Persamaan Mixer Quad-X Terkoreksi
+### Persamaan Mixer Quad-X Terkoreksi `[HARDWARE-DEPENDENT / UNTESTED IN FLIGHT]`
 Untuk menghasilkan momen pemulihan saat drone condong (misal hidung turun $\to$ motor depan menaikkan thrust untuk mengangkat hidung):
 
+Tanda pitch dikendalikan oleh `PITCH_MIX_SIGN` di `config.h`. Default `+1` mempertahankan perilaku firmware saat ini, sedangkan `-1` mengikuti tanda pitch referensi lama. Tes bench tanpa baling-baling: saat FLYING, hidung ditekan ke bawah harus menaikkan RPM motor depan (FL, FR), dan gesture MAJU harus menurunkan hidung. Jika tidak sesuai, ubah `PITCH_MIX_SIGN` ke `-1`.
+
 * **M1 (FR - Front-Right / CCW / GPIO 25)**:  
-  $$\text{PWM}_{\text{FR}} = \text{Throttle} - \text{Roll}_{\text{out}} + \text{Pitch}_{\text{out}} - \text{Yaw}_{\text{out}}$$
+  $$\text{PWM}_{\text{FR}} = \text{Throttle} - \text{Roll}_{\text{out}} + (\text{Pitch}_{\text{out}} \times \text{PITCH\_MIX\_SIGN}) - \text{Yaw}_{\text{out}}$$
 * **M2 (RR - Rear-Right / CW / GPIO 33)**:  
-  $$\text{PWM}_{\text{RR}} = \text{Throttle} - \text{Roll}_{\text{out}} - \text{Pitch}_{\text{out}} + \text{Yaw}_{\text{out}}$$
+  $$\text{PWM}_{\text{RR}} = \text{Throttle} - \text{Roll}_{\text{out}} - (\text{Pitch}_{\text{out}} \times \text{PITCH\_MIX\_SIGN}) + \text{Yaw}_{\text{out}}$$
 * **M3 (RL - Rear-Left / CCW / GPIO 12)**:  
-  $$\text{PWM}_{\text{RL}} = \text{Throttle} + \text{Roll}_{\text{out}} - \text{Pitch}_{\text{out}} - \text{Yaw}_{\text{out}}$$
+  $$\text{PWM}_{\text{RL}} = \text{Throttle} + \text{Roll}_{\text{out}} - (\text{Pitch}_{\text{out}} \times \text{PITCH\_MIX\_SIGN}) - \text{Yaw}_{\text{out}}$$
 * **M4 (FL - Front-Left / CW / GPIO 27)**:  
-  $$\text{PWM}_{\text{FL}} = \text{Throttle} + \text{Roll}_{\text{out}} + \text{Pitch}_{\text{out}} + \text{Yaw}_{\text{out}}$$
+  $$\text{PWM}_{\text{FL}} = \text{Throttle} + \text{Roll}_{\text{out}} + (\text{Pitch}_{\text{out}} \times \text{PITCH\_MIX\_SIGN}) + \text{Yaw}_{\text{out}}$$
 
 ### Manajemen Saturasi (AirMode Attitude Preservation & Dynamic Landing Floor)
 Ketika salah satu motor mencapai batas atas `PWM_MAX` (1999 µs) atau batas bawah akibat manuver dinamis:
@@ -449,7 +457,7 @@ Ketika salah satu motor mencapai batas atas `PWM_MAX` (1999 µs) atau batas bawa
 | [`src/imu/imu.cpp`](file:///c:/Users/asus/Documents/PlatformIO/Projects/QuadcopterF450/src/imu/imu.cpp) | **Core 1** | Driver MPU6050, I2C timeout 5ms, validasi return register, penanganan NaN & fail counter. |
 | [`src/motor/motor.cpp`](file:///c:/Users/asus/Documents/PlatformIO/Projects/QuadcopterF450/src/motor/motor.cpp) | **Core 1** | ESC PWM 500 Hz, Quad-X mixing, AirMode anti-clipping & dynamic landing throttle floor. |
 | [`src/pid/pid.cpp`](file:///c:/Users/asus/Documents/PlatformIO/Projects/QuadcopterF450/src/pid/pid.cpp) | **Core 1** | Perhitungan Cascade PID trapesium dengan clamping anti-windup. |
-| [`src/ReceiverEspNow/ReceiverEspNow.cpp`](file:///c:/Users/asus/Documents/PlatformIO/Projects/QuadcopterF450/src/ReceiverEspNow/ReceiverEspNow.cpp) | **Core 0** | ESP-NOW callback minimal dengan spinlock ISR `_rawMux` & deduplikasi sequence paket V2. |
+| [`src/ReceiverEspNow/ReceiverEspNow.cpp`](file:///c:/Users/asus/Documents/PlatformIO/Projects/QuadcopterF450/src/ReceiverEspNow/ReceiverEspNow.cpp) | **Core 0** | ESP-NOW callback minimal dengan filter MAC, kanal WiFi eksplisit, spinlock `_rawMux`, dan deduplikasi sequence paket V2. |
 
 ---
 
@@ -469,7 +477,7 @@ Ketika salah satu motor mencapai batas atas `PWM_MAX` (1999 µs) atau batas bawa
 | `'b'` | `BENCH_TOGGLE` | Membuka / mengunci izin perubahan throttle manual via keyboard. |
 | `'+'` / `'-'` | Throttle Naik / Turun | Mengubah throttle $\pm 25\text{ µs}$ (hanya jika mode `'b'` aktif). |
 | `'c'` | `CALIBRATE` | Menjalankan kalibrasi IMU 2000 sampel (hanya saat `DISARMED`). |
-| `'?'` | `STATUS` | Mencetak laporan diagnostik sistem, kesehatan IMU, dan jitter loop. |
+| `'?'` | `STATUS` | Mencetak laporan diagnostik sistem, kesehatan IMU, jitter loop, dan stack high-water mark task. |
 
 ---
 
@@ -532,9 +540,9 @@ graph TD
 2. Tepat 1000 ms setelah transmisi paket terputus:
    - Failsafe lokal Core 1 mendeteksi timeout: `[FAILSAFE] Sinyal controller terputus saat FLYING! Mengaktifkan controlled landing...`.
    - Status berpindah ke `STATE_LANDING`.
-   - Throttle turun bertahap 2 µs per loop (~500 µs/detik).
+   - Throttle turun bertahap sekitar 80 µs/detik.
    - Motor mixer menerapkan *dynamic landing floor*: motor diizinkan turun di bawah 1170 µs hingga mencapai 1050 µs.
-   - Setelah menahan floor selama 2000 ms (`FAILSAFE_FLOOR_HOLD_MS`) atau batas total pendaratan 6000 ms habis, motor otomatis mati (`STATE_DISARMED`).
+   - Setelah menahan floor selama 2000 ms (`FAILSAFE_FLOOR_HOLD_MS`) atau batas total pendaratan 12000 ms habis, motor otomatis mati (`STATE_DISARMED`).
 
 ---
 
@@ -543,6 +551,6 @@ graph TD
 |---|---|---|
 | **Boot gagal, log mencetak IMU ERROR** | Modul MPU6050 tidak merespons pada bus I2C. | Periksa kabel jumper SDA (GPIO 21) & SCL (GPIO 22). Pastikan modul MPU6050 mendapat tegangan 3.3V stabil dan pull-up resistor terpasang. |
 | **ARM selalu ditolak (`[SAFETY] GAGAL`)** | Drone miring ($>30^\circ$) atau paket remote belum diterima. | Letakkan drone pada permukaan datar. Pastikan transmitter glove aktif dan mengirim paket valid pada Kanal WiFi 1. |
-| **Arah koreksi motor terbalik saat frame dimiringkan** | Susunan pin motor atau konfigurasi arah CW/CCW terbalik. | Cek skema Quad-X: FL (Pin 27, CW), FR (Pin 25, CCW), RL (Pin 12, CCW), RR (Pin 33, CW). |
+| **Arah koreksi motor terbalik saat frame dimiringkan** | Susunan pin motor, konfigurasi arah CW/CCW, atau tanda pitch mixer belum sesuai hardware. | Cek skema Quad-X: FL (Pin 27, CW), FR (Pin 25, CCW), RL (Pin 12, CCW), RR (Pin 33, CW). Untuk arah pitch, uji `PITCH_MIX_SIGN` sesuai prosedur bench tanpa baling-baling. |
 | **Osilasi atau getaran tinggi pada frame** | Gain PID Rate terlalu agresif untuk inersia frame F450. | Turunkan gain `P_RATE_ROLL` dan `P_RATE_PITCH` di [`config.h`](file:///c:/Users/asus/Documents/PlatformIO/Projects/QuadcopterF450/include/config.h) secara bertahap (misal dari 0.625 ke 0.450). |
 | **Paket remote sering hilang / terputus** | Interferensi frekuensi 2.4 GHz atau perbedaan kanal WiFi. | Pastikan `ESPNOW_WIFI_CHANNEL` pada remote dan drone sama-sama diatur ke Kanal 1, dan antena PCB tidak tertutup material karbon. |
