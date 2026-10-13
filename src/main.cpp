@@ -26,9 +26,6 @@ void setup()
     Serial.begin(115200);
     delay(500);
 
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, HIGH); // LED menyala solid = DISARMED (mode aman)
-
     Serial.println("\n========================================================");
     Serial.println("  QUADCOPTER F450 — DUAL-CORE FREERTOS ARCHITECTURE");
     Serial.println("  Core 0: Communication Task (ESP-NOW + Serial) [50Hz]");
@@ -47,7 +44,6 @@ void setup()
         Serial.println("[FATAL ERROR] Periksa kabel SDA/SCL. Boot dihentikan demi keselamatan.");
         while (1)
         {
-            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
             delay(200);
         }
     }
@@ -66,8 +62,7 @@ void setup()
         Serial.println("[FATAL ERROR] Gagal mengalokasikan Command Queue!");
         while (1)
         {
-            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-            delay(100);
+            delay(200);
         }
     }
 
@@ -86,8 +81,7 @@ void setup()
         Serial.println("[FATAL ERROR] Gagal mengalokasikan FlightTask pada Core 1!");
         while (1)
         {
-            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-            delay(100);
+            delay(200);
         }
     }
 
@@ -106,8 +100,7 @@ void setup()
         Serial.println("[FATAL ERROR] Gagal mengalokasikan CommTask pada Core 0!");
         while (1)
         {
-            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-            delay(100);
+            delay(200);
         }
     }
 
@@ -115,7 +108,7 @@ void setup()
     Serial.println("=== PANDUAN PENGUJIAN AMAN (BENCH TEST TANPA BALING-BALING) ===");
     Serial.println("  '1'     : BTN_ARM_LAND (DISARMED → ARMED → LANDING → CONFIRM)");
     Serial.println("  '2'     : BTN_EMERGENCY (motor cut seketika dari state manapun)");
-    Serial.println("  '3'     : BTN_READY (buka 1 sesi pengenalan gesture)");
+    Serial.println("  '3'     : BTN_READY (ARMED: auto-takeoff, FLYING: buka 1 sesi gesture)");
     Serial.println("  'w/s'   : Gesture MAJU / MUNDUR (tilt target 3° selama 0.5s)");
     Serial.println("  'a/d'   : Gesture KIRI / KANAN (tilt target 3° selama 0.5s)");
     Serial.println("  'b'     : Buka / kunci izin kenaikan throttle simulasi serial");

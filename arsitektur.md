@@ -148,7 +148,7 @@ graph TB
   (Rear-Left)     GPIO 12 ----|            |---- GPIO 4
                   GPIO 13 ----|            |---- GPIO 0
                       GND ----|            |---- GPIO 2
-                      VIN ----|            |---- GPIO 15 (LED Indikator)
+                      VIN ----|            |---- GPIO 15
                               +------------+
 ```
 
@@ -161,7 +161,6 @@ graph TB
 | **Motor 4 (Front-Left)** | **GPIO 27** | LEDC Timer 0 | PWM 500 Hz (1000–1999 µs) | Putaran CW (Baling-baling Standar) |
 | **MPU6050 SDA**         | **GPIO 21** | I2C Open-Drain | Data Bus I2C Fast-Mode | Memerlukan resistor pull-up 4.7 kΩ ke 3.3V |
 | **MPU6050 SCL**         | **GPIO 22** | I2C Open-Drain | Clock Bus I2C 400 kHz | Memerlukan resistor pull-up 4.7 kΩ ke 3.3V |
-| **Indikator Status LED**| **GPIO 15** | GPIO Output | Active-HIGH Logic | Menyala solid saat `DISARMED`, padam saat aktif |
 
 ---
 
@@ -171,21 +170,20 @@ graph TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> STATE_DISARMED : Boot Init (Motor Cut 1000µs, LED ON)
+    [*] --> STATE_DISARMED : Boot Init (Motor Cut 1000µs)
 
-    state "STATE_DISARMED (0)<br/>Motor: CUT (1000µs)<br/>LED: ON (Solid)" as DISARMED
-    state "STATE_ARMED (1)<br/>Motor: IDLE (1170µs)<br/>LED: OFF" as ARMED
-    state "STATE_FLYING (2)<br/>Motor: Full PID Control<br/>LED: OFF" as FLYING
-    state "STATE_LANDING (3)<br/>Motor: Auto-Ramp Down (80µs/detik)<br/>LED: OFF" as LANDING
-    state "STATE_EMERGENCY (4)<br/>Motor: CUT (1000µs)<br/>LED: OFF" as EMERGENCY
+    state "STATE_DISARMED (0)<br/>Motor: CUT (1000µs)" as DISARMED
+    state "STATE_ARMED (1)<br/>Motor: IDLE (1170µs)" as ARMED
+    state "STATE_FLYING (2)<br/>Motor: Full PID Control" as FLYING
+    state "STATE_LANDING (3)<br/>Motor: Auto-Ramp Down (80µs/detik)" as LANDING
+    state "STATE_EMERGENCY (4)<br/>Motor: CUT (1000µs)" as EMERGENCY
 
     DISARMED --> ARMED : Perintah BTN_ARM_LAND<br/>[Syarat: Safety Check LULUS]
     ARMED --> DISARMED : Perintah BTN_ARM_LAND<br/>[Batal terbang di tanah]
     ARMED --> DISARMED : Failsafe Timeout<br/>[Sinyal putus saat idle di tanah]
-    ARMED --> FLYING : Throttle dinaikkan<br/>[Throttle > 1270 µs]
+    ARMED --> FLYING : READY auto-takeoff<br/>[Throttle otomatis > 1270 µs]
 
     FLYING --> LANDING : Perintah BTN_ARM_LAND<br/>[Pilot minta mendarat]
-    FLYING --> LANDING : Pilot turunkan throttle <= 1050 µs
     FLYING --> LANDING : Failsafe Timeout<br/>[Sinyal putus saat terbang]
 
     LANDING --> DISARMED : Perintah BTN_ARM_LAND<br/>[Konfirmasi manual setelah >= 1,5 detik]
@@ -207,10 +205,11 @@ stateDiagram-v2
 ### Lapis Perlindungan Keselamatan (Safety Interlocks)
 
 #### 1. Validasi Pra-ARM (`safetyCheckPass`)
-Sebelum motor diizinkan berputar pada batas idle, firmware memverifikasi 3 parameter:
+Sebelum motor diizinkan berputar pada batas idle, firmware memverifikasi 2 parameter:
 1. **Integritas Sensor IMU**: `imu.isHealthy() == true`, sudut roll dan pitch bukan NaN, serta orientasi awal drone berada pada permukaan datar ($|\text{Roll}| < 30^\circ$ dan $|\text{Pitch}| < 30^\circ$).
 2. **Konektivitas Remote**: Sinyal remote telah diterima secara valid dan waktu paket terakhir $< 1000\text{ ms}$.
-3. **Posisi Throttle Remote**: Data throttle fisik remote dari paket harus berada pada posisi minimum ($\le \text{PWM\_IDLE} + 50 = 1220\text{ µs}$). Ini mencegah drone langsung terbang mendadak saat di-arm.
+
+Pengecekan throttle fisik remote dihapus karena throttle penerbangan tidak lagi berasal dari remote. Setelah `ARMED`, tombol `READY` meminta auto-takeoff: throttle naik otomatis dari `PWM_IDLE` menuju `HOVER_THROTTLE = 1300 µs` dengan laju `TAKEOFF_RAMP_PER_SEC = 120 µs/detik`. `HOVER_THROTTLE` adalah nilai awal `[HARDWARE-DEPENDENT / UNTESTED IN FLIGHT]` dan wajib dituning bertahap saat uji tether sampai drone mulai ringan.
 
 #### 2. Auto-Cut Kemiringan Darurat (> 45°) & Kegagalan IMU
 Jika drone mengalami benturan keras, terbalik, atau sensor MPU6050 mengalami kegagalan I2C berturut-turut saat dalam status `ARMED`, `FLYING`, atau `LANDING`, firmware seketika memotong seluruh sinyal motor ke `1000 µs` (`STATE_EMERGENCY`) untuk mencegah kerusakan motor BLDC atau luka fisik akibat propeller liar.
@@ -236,11 +235,17 @@ Remote pengendali menggunakan 3 tombol fisik dan 1 sensor IMU pendeteksi gestur 
 ### Tabel Perilaku Tombol Kontekstual (`BTN_ARM_LAND`)
 | Status Drone Saat Ditekan | Aksi yang Dijalankan | Status Baru | Keterangan Operasional |
 |---|---|---|---|
-| `STATE_DISARMED` | **ARM** | `STATE_ARMED` | Menjalankan safety check (sudut datar, remote online, throttle low). |
-| `STATE_ARMED` | **DISARM** | `STATE_DISARMED` | Membatalkan persiapan terbang sebelum throttle dinaikkan. |
+| `STATE_DISARMED` | **ARM** | `STATE_ARMED` | Menjalankan safety check (sudut datar dan remote online). |
+| `STATE_ARMED` | **DISARM** | `STATE_DISARMED` | Membatalkan persiapan terbang sebelum auto-takeoff diminta. |
 | `STATE_FLYING` | **LAND** | `STATE_LANDING` | Memulai penurunan throttle bertahap. |
 | `STATE_LANDING` | **CONFIRM** | `STATE_DISARMED` | Konfirmasi manual pilot bahwa drone telah mendarat di tanah; diterima setelah landing berjalan minimal 1,5 detik. |
 | `STATE_EMERGENCY` | **RESET** | `STATE_DISARMED` | Memulihkan sistem dari kondisi darurat ke kondisi aman. |
+
+### Tabel Perilaku Tombol READY (`BTN_READY`)
+| Status Drone Saat Ditekan | Aksi yang Dijalankan | Keterangan Operasional |
+|---|---|---|
+| `STATE_ARMED` | **AUTO-TAKEOFF** | Meminta throttle otomatis naik dari `PWM_IDLE` menuju `HOVER_THROTTLE` sampai transisi ke `STATE_FLYING`. |
+| `STATE_FLYING` | **GESTURE READY** | Membuka tepat 1 sesi pengenalan gestur. |
 
 ### Mesin Gestur Satu Langkah (Single-Step Gesture Engine)
 ```mermaid
@@ -314,7 +319,7 @@ Parser teks lama untuk bench/debug dinonaktifkan default (`ESPNOW_ALLOW_TEXT_PAR
 | `4` | `CMD_KANAN` | Gestur condong ke kanan (+3° Roll) |
 | `10` | `CMD_BTN_ARM_LAND` | Tombol kontekstual: ARM / LAND / CONFIRM / RESET |
 | `11` | `CMD_BTN_EMERGENCY`| Tombol darurat: Motor Cut seketika |
-| `12` | `CMD_BTN_READY` | Membuka 1 sesi pengenalan gestur |
+| `12` | `CMD_BTN_READY` | `ARMED`: auto-takeoff; `FLYING`: membuka 1 sesi pengenalan gestur |
 | `20` | `CMD_THROTTLE_UP` | Serial bench: Naikkan throttle simulasi (+25 µs) |
 | `21` | `CMD_THROTTLE_DN` | Serial bench: Turunkan throttle simulasi (-25 µs) |
 | `22` | `CMD_CALIBRATE` | Serial bench: Trigger kalibrasi sensor IMU |
@@ -471,7 +476,7 @@ Ketika salah satu motor mencapai batas atas `PWM_MAX` (1999 µs) atau batas bawa
 |---|---|---|
 | `'1'` | `BTN_ARM_LAND` | Tombol multi-state: DISARMED $\to$ ARMED $\to$ LANDING $\to$ CONFIRM. |
 | `'2'` | `BTN_EMERGENCY` | Memotong putaran motor seketika ke 1000 µs dari status manapun. |
-| `'3'` | `BTN_READY` | Membuka 1 sesi pengenalan gestur saat dalam status `FLYING`. |
+| `'3'` | `BTN_READY` | `ARMED`: mulai auto-takeoff; `FLYING`: membuka 1 sesi pengenalan gestur. |
 | `'w'` / `'s'` | Gesture Maju / Mundur | Memberikan target Pitch $\pm 3.0^\circ$ selama 500 ms lalu kembali netral. |
 | `'a'` / `'d'` | Gesture Kiri / Kanan | Memberikan target Roll $\pm 3.0^\circ$ selama 500 ms lalu kembali netral. |
 | `'b'` | `BENCH_TOGGLE` | Membuka / mengunci izin perubahan throttle manual via keyboard. |
@@ -485,8 +490,8 @@ Ketika salah satu motor mencapai batas atas `PWM_MAX` (1999 µs) atau batas bawa
 
 ```mermaid
 graph TD
-    T1["Tahap 1: Dual-Core Boot & Hardware Init<br/>Core 0 & Core 1 aktif, LED menyala solid"] --> T2["Tahap 2: Uji Inter-Core IPC & Safety Interlock<br/>Verifikasi penolakan ARM tanpa remote/sensor datar"]
-    T2 --> T3["Tahap 3: Uji Mode Bench Throttle ('b' & '+/-')<br/>Buka guard 'b', naikkan throttle -> ARMED ke FLYING"]
+    T1["Tahap 1: Dual-Core Boot & Hardware Init<br/>Core 0 & Core 1 aktif"] --> T2["Tahap 2: Uji Inter-Core IPC & Safety Interlock<br/>Verifikasi penolakan ARM tanpa remote/sensor datar"]
+    T2 --> T3["Tahap 3: Uji Auto-Takeoff READY<br/>ARM lalu READY -> throttle ramp ke HOVER_THROTTLE"]
     T3 --> T4["Tahap 4: Uji Dinamika Gesture Satu Langkah<br/>Tekan '3' lalu 'w'/'s'/'a'/'d', amati target tilt 500 ms"]
     T4 --> T5["Tahap 5: Uji Proteksi Kemiringan Darurat (> 45°)<br/>Miringkan frame > 45° -> Verifikasi Emergency Auto-Cut"]
     T5 --> T6["Tahap 6: Uji Failsafe Lost Signal & Dynamic Landing<br/>Matikan remote saat FLYING -> Penurunan bertahap ke 1050µs"]
@@ -499,18 +504,25 @@ graph TD
    - Log mencetak: `[FLIGHT TASK] Berjalan pada Core 1 (Prioritas 5)`.
    - Log mencetak: `[COMM TASK] Berjalan pada Core 0 (Prioritas 2)`.
    - Sensor MPU6050 terdeteksi (`0x68` / `0x69`) dan terkonfigurasi (DLPF 44Hz, Gyro ±500°/s, Accel ±8g).
-   - LED indikator GPIO 15 menyala solid (`SAFE DISARMED`).
    - Keempat motor diam total (`PWM_ARM = 1000 µs`).
 
 #### Tahap 2: Verifikasi Antrean Perintah IPC & Safety Interlock
 1. Tekan `'?'` di serial console. Sistem mencetak laporan diagnostik sistem (`STATE_DISARMED`).
 2. Tekan `'1'`. Jika remote belum terkoneksi atau drone tidak datar, sistem menolak ARM dengan log:
    `[SAFETY] GAGAL: Controller nirkabel belum terhubung!` atau `[SAFETY] GAGAL: Drone miring (>30°)!`.
-3. Hubungkan remote glove atau simulasikan paket. Setelah syarat terpenuhi, tekan `'1'` $\to$ Drone berpindah ke `STATE_ARMED` (LED padam, motor berputar idle `1170 µs`).
+3. Hubungkan remote glove atau simulasikan paket. Setelah syarat terpenuhi, tekan `'1'` $\to$ Drone berpindah ke `STATE_ARMED` dan motor berputar idle `1170 µs`.
 4. Tekan `'2'` $\to$ Sistem seketika masuk ke `STATE_EMERGENCY` (seluruh motor mati seketika `1000 µs`).
 5. Tekan `'1'` $\to$ Sistem ter-reset dari darurat kembali ke `STATE_DISARMED`.
 
-#### Tahap 3: Uji Mode Bench Throttle Guard
+#### Tahap 3: Uji Auto-Takeoff READY
+1. Posisikan drone dalam status `ARMED`.
+2. Tekan `'3'` (`BTN_READY`).
+3. **Hasil yang Diharapkan:**
+   - Log menampilkan: `[TAKEOFF] Naik otomatis menuju throttle hover.`.
+   - Telemetri throttle naik bertahap dari `1170 µs` menuju `HOVER_THROTTLE = 1300 µs` `[HARDWARE-DEPENDENT / UNTESTED IN FLIGHT]`.
+   - Saat throttle melewati `PWM_IDLE + 100` (`1270 µs`), state berpindah otomatis ke `STATE_FLYING`.
+
+#### Tahap 3b: Uji Mode Bench Throttle Guard
 1. Posisikan drone dalam status `ARMED`.
 2. Tekan `'+'`. Sistem menolak kenaikan throttle dengan pesan pengaman:  
    `[SAFETY] Throttle serial terkunci. Tekan 'b' untuk membuka mode Bench Test.`.

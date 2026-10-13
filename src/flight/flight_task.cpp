@@ -20,6 +20,8 @@ static float smoothPitch           = 0.0f;
 static float smoothRoll            = 0.0f;
 
 static int   currentThrottle       = PWM_ARM;
+static float autoThrottle          = PWM_IDLE;
+static bool  takeoffRequested      = false;
 
 // Sesi pengenalan gesture satu langkah (READY -> 1 Gerakan -> Netral)
 static bool     gestureReady       = false;  // True setelah tombol READY ditekan
@@ -92,14 +94,6 @@ static bool safetyCheckPass(const SharedState &local)
         return false;
     }
 
-    // 3. Throttle fisik remote harus di posisi aman (minimum)
-    if (local.throttle > PWM_IDLE + 50)
-    {
-        Serial.printf("[SAFETY] GAGAL: Throttle remote (%d µs) terlalu tinggi! Turunkan throttle ke minimum sebelum ARM.\n",
-                      local.throttle);
-        return false;
-    }
-
     Serial.println("[SAFETY] LULUS: Semua pengecekan aman.");
     return true;
 }
@@ -123,11 +117,12 @@ static void transitionTo(DroneState newState)
         gestureReady = false;
         gestureActive = false;
         currentThrottle = PWM_ARM;
+        autoThrottle = PWM_IDLE;
+        takeoffRequested = false;
         landingStartTime = 0;
         floorHoldStartTime = 0;
         controller.reset();
         motor.cut();
-        digitalWrite(LED_PIN, HIGH); // LED solid = DISARMED (aman)
         Serial.println("[STATUS] Motor DIMATIKAN. Drone aman.");
         break;
 
@@ -138,11 +133,12 @@ static void transitionTo(DroneState newState)
         gestureReady = false;
         gestureActive = false;
         currentThrottle = PWM_IDLE;
+        autoThrottle = PWM_IDLE;
+        takeoffRequested = false;
         landingStartTime = 0;
         floorHoldStartTime = 0;
         controller.reset();
-        digitalWrite(LED_PIN, LOW); // LED mati = ARMED
-        Serial.println("[STATUS] Motor ARMED (idle floor). Naikkan throttle untuk terbang.");
+        Serial.println("[STATUS] Motor ARMED (idle floor). Tekan READY untuk auto-takeoff.");
         break;
 
     case STATE_FLYING:
@@ -159,6 +155,8 @@ static void transitionTo(DroneState newState)
         gestureReady = false;
         gestureActive = false;
         landingThrottle = currentThrottle;
+        autoThrottle = PWM_IDLE;
+        takeoffRequested = false;
         landingStartTime = millis();
         floorHoldStartTime = 0;
         Serial.println("[STATUS] Controlled Landing dimulai. Throttle diturunkan bertahap.");
@@ -174,6 +172,8 @@ static void transitionTo(DroneState newState)
         controller.reset();
         motor.cut();
         currentThrottle = PWM_ARM;
+        autoThrottle = PWM_IDLE;
+        takeoffRequested = false;
         Serial.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         Serial.println("!!!     EMERGENCY: MOTOR DI-CUT!    !!!");
         Serial.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
@@ -289,7 +289,13 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local, floa
             break;
         }
 
-        // Throttle dinaikkan melewati ambang batas -> otomatis masuk FLYING
+        if (cmd == CMD_BTN_READY && !takeoffRequested)
+        {
+            takeoffRequested = true;
+            Serial.println("[TAKEOFF] Naik otomatis menuju throttle hover.");
+        }
+
+        // Auto-throttle naik melewati ambang batas -> otomatis masuk FLYING
         if (currentThrottle > PWM_IDLE + 100)
         {
             transitionTo(STATE_FLYING);
@@ -452,21 +458,16 @@ void flightTask(void *pvParameters)
         g_sharedState.droneState = droneState; // Bagikan status ke Core 0
         portEXIT_CRITICAL(&g_sharedMux);
 
-        // Update throttle dari remote jika diizinkan oleh state saat ini.
-        // Nilai throttle 0 tidak pernah ditulis ke shared state oleh commTask.
-        if (!localShared.benchThrottleEnabled && droneState == STATE_ARMED)
+        if (!localShared.benchThrottleEnabled &&
+            (droneState == STATE_ARMED || droneState == STATE_FLYING))
         {
-            if (localShared.throttle >= PWM_MIN && localShared.throttle <= THROTTLE_MAX)
+            float target = takeoffRequested ? (float)HOVER_THROTTLE : (float)PWM_IDLE;
+            if (autoThrottle < target)
             {
-                currentThrottle = max((int)localShared.throttle, (int)PWM_IDLE);
+                autoThrottle += TAKEOFF_RAMP_PER_SEC * dt;
+                if (autoThrottle > target) autoThrottle = target;
             }
-        }
-        else if (!localShared.benchThrottleEnabled && droneState == STATE_FLYING)
-        {
-            if (localShared.throttle >= PWM_MIN)
-            {
-                currentThrottle = min((int)localShared.throttle, (int)THROTTLE_MAX);
-            }
+            currentThrottle = (int)(autoThrottle + 0.5f);
         }
 
         // 3. Update sensor IMU (MPU6050) dengan pembacaan fisik terbaru

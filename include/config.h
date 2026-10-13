@@ -15,9 +15,6 @@
 #define SDA_PIN 21
 #define SCL_PIN 22
 
-// -- LED INDIKATOR --
-#define LED_PIN 15
-
 // -- MPU6050 SENSOR SCALE --
 // Gyro  : ±500°/s  → 65.5 LSB/(°/s)   (reg 0x1B = 0x08)
 // Accel : ±8g      → 4096 LSB/g        (reg 0x1C = 0x10)
@@ -104,6 +101,8 @@
 #define MAX_IMU_FAIL_COUNT       5     // Batas toleransi pembacaan gagal berturut-turut sebelum IMU flagged dead
 
 // -- STATE MACHINE & LANDING --
+#define HOVER_THROTTLE        1300   // µs, TEBAKAN AWAL. WAJIB dituning saat uji tether sampai drone mulai ringan
+#define TAKEOFF_RAMP_PER_SEC  120.0f // µs/detik, kecepatan naik menuju hover
 #define LANDING_THROTTLE_DROP_PER_SEC 80.0f // Penurunan throttle saat landing (µs/detik)
 #define LANDING_THROTTLE_FLOOR   1050  // Throttle minimum saat landing sebelum konfirmasi sentuh tanah
 #define LANDING_MANUAL_CONFIRM_MIN_MS 1500 // Tombol konfirmasi landing baru diterima setelah 1,5 detik
