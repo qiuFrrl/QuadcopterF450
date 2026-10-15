@@ -91,6 +91,14 @@ struct __attribute__((packed)) DronePacketV2
     uint16_t throttle;     // Nilai throttle (1000 - 1800 µs), 0 = abaikan
 };
 
+// Struktur paket status broadcast dari Drone ke Controller (3 bytes)
+struct __attribute__((packed)) DroneStatusPacket
+{
+    uint8_t magic; // 0xA5
+    uint8_t state; // DroneState enum
+    uint8_t seq;   // Sequence counter
+};
+
 // Raw buffer untuk transfer aman dari callback ESP-NOW ke commTask (Core 0)
 struct RawPacket
 {

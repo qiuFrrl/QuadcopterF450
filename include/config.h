@@ -108,8 +108,9 @@
 #define LANDING_MANUAL_CONFIRM_MIN_MS 1500 // Tombol konfirmasi landing baru diterima setelah 1,5 detik
 
 // -- GESTURE STEP SETTINGS --
-#define GESTURE_STEP_DURATION_MS  500  // Durasi satu langkah gesture (ms) — 0.5 detik miringkan lalu kembali
-#define GESTURE_TILT_ANGLE        3.0f // Kemiringan saat gesture aktif (derajat, lebih kecil dari manual)
+#define GESTURE_STEP_DURATION_MS  1000 // Durasi satu langkah gesture (ms) — 1 detik miringkan lalu kembali
+#define GESTURE_TILT_ANGLE        4.0f // Kemiringan saat gesture aktif (derajat)
+#define GESTURE_THROTTLE_BOOST    80   // µs penambahan throttle otomatis saat gesture aktif (di atas HOVER_THROTTLE)
 
 // -- SAFETY --
 #define IMU_MAX_TILT_ANGLE       45.0f // Sudut miring maksimum sebelum emergency auto-cut (derajat)

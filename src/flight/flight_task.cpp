@@ -30,6 +30,7 @@ static uint32_t gestureStartTime   = 0;      // Waktu mulai gesture step
 static float    landingThrottle    = PWM_IDLE;
 static uint32_t landingStartTime   = 0;
 static uint32_t floorHoldStartTime = 0;
+static uint32_t s_armTransitionTimeMs = 0;
 
 // Diagnostik Flight Control Loop
 static uint32_t maxExecDurationUs  = 0;
@@ -78,11 +79,10 @@ static void idle()
 // ================================================================
 static bool safetyCheckPass(const SharedState &local)
 {
-    // 1. IMU harus sehat, bukan NaN, dan drone berada pada posisi rata (< 30 derajat)
-    if (!imu.isHealthy() || isnan(imu.roll) || isnan(imu.pitch) ||
-        abs(imu.roll) > 30.0f || abs(imu.pitch) > 30.0f)
+    // 1. Cek kesehatan sensor IMU
+    if (!imu.isHealthy())
     {
-        Serial.println("[SAFETY] GAGAL: Sensor IMU tidak sehat atau drone miring (>30°)! Ratakan drone sebelum ARM.");
+        Serial.println("[SAFETY] GAGAL: Sensor IMU tidak terdeteksi atau bermasalah!");
         return false;
     }
 
@@ -94,7 +94,7 @@ static bool safetyCheckPass(const SharedState &local)
         return false;
     }
 
-    Serial.println("[SAFETY] LULUS: Semua pengecekan aman.");
+    Serial.println("[SAFETY] LULUS: ARM diizinkan.");
     return true;
 }
 
@@ -134,11 +134,14 @@ static void transitionTo(DroneState newState)
         gestureActive = false;
         currentThrottle = PWM_IDLE;
         autoThrottle = PWM_IDLE;
-        takeoffRequested = false;
+        takeoffRequested = true; // Langsung spool up menuju hover untuk uji rig PID
         landingStartTime = 0;
         floorHoldStartTime = 0;
+        s_armTransitionTimeMs = millis();
         controller.reset();
-        Serial.println("[STATUS] Motor ARMED (idle floor). Tekan READY untuk auto-takeoff.");
+        Serial.printf("[STATUS] Motor ARMED @ %d us. Naik bertahap menuju HOVER %d us...\n", PWM_IDLE, HOVER_THROTTLE);
+        Serial.println("[STATUS] Cascade PID aktif pada rig. Siap menerima gesture belok/arah.");
+        Serial.println("[STATUS] Tekan EMERGENCY untuk mematikan semua motor.");
         break;
 
     case STATE_FLYING:
@@ -198,12 +201,14 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local, floa
     // ────────────────────────────────────────────────────────────
     //  2. LOCAL SAFETY CHECK: Auto-cut jika orientasi ekstrim (> 45°) atau IMU mati
     // ────────────────────────────────────────────────────────────
-    if (droneState == STATE_FLYING || droneState == STATE_LANDING || droneState == STATE_ARMED)
+    // IMU auto-cut dinonaktifkan untuk mode uji motor sederhana
+    // Jika IMU mati, motor tetap jalan di base throttle 1050
+    if (droneState == STATE_FLYING || droneState == STATE_LANDING)
     {
-        if (!imu.isHealthy() || isnan(imu.roll) || isnan(imu.pitch) ||
-            abs(imu.roll) > IMU_MAX_TILT_ANGLE || abs(imu.pitch) > IMU_MAX_TILT_ANGLE)
+        if (imu.isHealthy() && !isnan(imu.roll) && !isnan(imu.pitch) &&
+            (abs(imu.roll) > IMU_MAX_TILT_ANGLE || abs(imu.pitch) > IMU_MAX_TILT_ANGLE))
         {
-            Serial.println("[SAFETY] Sudut melebihi 45° atau sensor IMU rusak! Emergency auto-cut!");
+            Serial.println("[SAFETY] Sudut melebihi 45 derajat! Emergency auto-cut!");
             transitionTo(STATE_EMERGENCY);
             return;
         }
@@ -282,23 +287,38 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local, floa
         break;
 
     case STATE_ARMED:
-        // Tombol 1 saat ARMED -> Kembali ke DISARMED (batal terbang)
+        // Tombol ARM lagi saat ARMED -> Kembali ke DISARMED (dengan debounce 1000ms agar burst paket tidak langsung membatalkan)
         if (cmd == CMD_BTN_ARM_LAND)
         {
-            transitionTo(STATE_DISARMED);
+            if (millis() - s_armTransitionTimeMs >= 1000)
+            {
+                Serial.println("[ARM] Tombol ARM ditekan kembali setelah 1 detik. Kembali ke DISARMED.");
+                transitionTo(STATE_DISARMED);
+            }
             break;
         }
 
-        if (cmd == CMD_BTN_READY && !takeoffRequested)
-        {
-            takeoffRequested = true;
-            Serial.println("[TAKEOFF] Naik otomatis menuju throttle hover.");
-        }
-
-        // Auto-throttle naik melewati ambang batas -> otomatis masuk FLYING
-        if (currentThrottle > PWM_IDLE + 100)
+        // Auto-throttle naik mendekati hover -> otomatis masuk FLYING
+        if (currentThrottle >= PWM_IDLE + 80)
         {
             transitionTo(STATE_FLYING);
+        }
+
+        // Langsung terima gesture saat ARMED (baik sebelum maupun sesudah masuk FLYING)
+        if (cmd == CMD_MAJU || cmd == CMD_MUNDUR || cmd == CMD_KIRI || cmd == CMD_KANAN)
+        {
+            switch (cmd)
+            {
+            case CMD_MAJU:   maju();   break;
+            case CMD_MUNDUR: mundur(); break;
+            case CMD_KIRI:   kiri();   break;
+            case CMD_KANAN:  kanan();  break;
+            default: break;
+            }
+            gestureActive = true;
+            gestureStartTime = millis();
+            Serial.printf("[GESTURE] Diterima saat ARMED! Target Throttle %d us (Hover+%d us) selama %d ms\n",
+                          HOVER_THROTTLE + GESTURE_THROTTLE_BOOST, GESTURE_THROTTLE_BOOST, GESTURE_STEP_DURATION_MS);
         }
         break;
 
@@ -310,48 +330,22 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local, floa
             break;
         }
 
-        // Tombol READY -> Buka SATU sesi gesture
-        if (cmd == CMD_BTN_READY)
+        // Langsung eksekusi gesture arah tanpa butuh penekanan tombol sesi terpisah
+        if (cmd == CMD_MAJU || cmd == CMD_MUNDUR || cmd == CMD_KIRI || cmd == CMD_KANAN)
         {
-            if (!gestureActive)
-            {
-                gestureReady = true;
-                Serial.println("[GESTURE] Sesi READY aktif! Kirim satu gesture (MAJU/MUNDUR/KIRI/KANAN).");
-            }
-        }
-
-        // Gesture hanya diproses jika sesi READY aktif
-        if (gestureReady && !gestureActive)
-        {
-            bool validGesture = false;
             switch (cmd)
             {
-            case CMD_MAJU:   maju();   validGesture = true; break;
-            case CMD_MUNDUR: mundur(); validGesture = true; break;
-            case CMD_KIRI:   kiri();   validGesture = true; break;
-            case CMD_KANAN:  kanan();  validGesture = true; break;
+            case CMD_MAJU:   maju();   break;
+            case CMD_MUNDUR: mundur(); break;
+            case CMD_KIRI:   kiri();   break;
+            case CMD_KANAN:  kanan();  break;
             default: break;
             }
-
-            if (validGesture)
-            {
-                gestureActive = true;
-                gestureReady = false; // Kunci sesi agar hanya 1 gesture per penekanan READY
-                gestureStartTime = millis();
-                Serial.printf("[GESTURE] Dieksekusi: Kemiringan %.1f° selama %dms\n",
-                              GESTURE_TILT_ANGLE, GESTURE_STEP_DURATION_MS);
-            }
-        }
-
-        // Otomatis kembalikan target ke netral setelah durasi langkah habis
-        if (gestureActive)
-        {
-            if (millis() - gestureStartTime >= GESTURE_STEP_DURATION_MS)
-            {
-                idle();
-                gestureActive = false;
-                Serial.println("[GESTURE] Selesai. Target orientasi kembali netral.");
-            }
+            gestureActive = true;
+            gestureStartTime = millis();
+            Serial.printf("[GESTURE] Dieksekusi: Arah %s, Target Throttle %d us (Hover+%d us) selama %d ms\n",
+                          (cmd == CMD_MAJU ? "MAJU" : (cmd == CMD_MUNDUR ? "MUNDUR" : (cmd == CMD_KIRI ? "KIRI" : "KANAN"))),
+                          HOVER_THROTTLE + GESTURE_THROTTLE_BOOST, GESTURE_THROTTLE_BOOST, GESTURE_STEP_DURATION_MS);
         }
 
         // Jika pilot menurunkan throttle sangat rendah -> masuk LANDING
@@ -417,6 +411,14 @@ static void processStateMachine(DroneCommand cmd, const SharedState &local, floa
         }
         break;
     }
+
+    // Kembalikan orientasi dan throttle ke normal setelah durasi gesture selesai (1 detik)
+    if (gestureActive && (millis() - gestureStartTime >= GESTURE_STEP_DURATION_MS))
+    {
+        idle();
+        gestureActive = false;
+        Serial.println("[GESTURE] Selesai 1 detik. Orientasi netral dan throttle kembali ke hover normal.");
+    }
 }
 
 // ================================================================
@@ -461,11 +463,23 @@ void flightTask(void *pvParameters)
         if (!localShared.benchThrottleEnabled &&
             (droneState == STATE_ARMED || droneState == STATE_FLYING))
         {
-            float target = takeoffRequested ? (float)HOVER_THROTTLE : (float)PWM_IDLE;
+            // Target dasar adalah HOVER_THROTTLE (1300 us)
+            // Saat gesture arah aktif, throttle otomatis dinaikkan di atas hover (1300 + 80 = 1380 us)
+            float target = (float)HOVER_THROTTLE;
+            if (gestureActive)
+            {
+                target += (float)GESTURE_THROTTLE_BOOST;
+            }
+
             if (autoThrottle < target)
             {
                 autoThrottle += TAKEOFF_RAMP_PER_SEC * dt;
                 if (autoThrottle > target) autoThrottle = target;
+            }
+            else if (autoThrottle > target)
+            {
+                autoThrottle -= TAKEOFF_RAMP_PER_SEC * dt;
+                if (autoThrottle < target) autoThrottle = target;
             }
             currentThrottle = (int)(autoThrottle + 0.5f);
         }
@@ -498,13 +512,15 @@ void flightTask(void *pvParameters)
         }
         else
         {
-            if (throttleInput < PWM_IDLE + 100)
+            if (throttleInput < PWM_IDLE + 50)
             {
+                // Saat idle awal di tanah sebelum spool up
                 controller.reset();
                 motor.mix(throttleInput, 0.0f, 0.0f, 0.0f);
             }
             else
             {
+                // Saat terbang / hover / uji rig PID: Aktifkan kendali Cascade PID!
                 controller.update(smoothRoll, smoothPitch, targetRateYaw,
                                   imu.roll, imu.pitch,
                                   imu.rollRate, imu.pitchRate, imu.yawRate,

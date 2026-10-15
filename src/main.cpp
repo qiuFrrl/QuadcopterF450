@@ -38,14 +38,19 @@ void setup()
 
     // 2. Inisialisasi Sensor IMU (MPU6050)
     Serial.println("[INIT] Menginisialisasi Sensor MPU6050...");
-    if (!imu.begin())
+    bool imuOk = false;
+    for (int retry = 0; retry < 3; retry++)
     {
-        Serial.println("[FATAL ERROR] Sensor MPU6050 gagal merespons!");
-        Serial.println("[FATAL ERROR] Periksa kabel SDA/SCL. Boot dihentikan demi keselamatan.");
-        while (1)
+        if (imu.begin())
         {
-            delay(200);
+            imuOk = true;
+            break;
         }
+        delay(150);
+    }
+    if (!imuOk)
+    {
+        Serial.println("[WARN] Sensor MPU6050 gagal merespons. Tetap lanjut agar receiver wireless aktif.");
     }
 
     // 3. Inisialisasi Receiver ESP-NOW

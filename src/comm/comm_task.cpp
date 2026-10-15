@@ -148,22 +148,25 @@ static void handleSerialCommands()
 
 void commTask(void *pvParameters)
 {
-    Serial.printf("[COMM TASK] Berjalan pada Core %d (Prioritas %d)\n",
-                  xPortGetCoreID(), uxTaskPriorityGet(NULL));
+    Serial.printf("[COMM TASK] Berjalan pada Core %d (Prioritas %d)\n", xPortGetCoreID(), uxTaskPriorityGet(NULL));
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xPeriod = pdMS_TO_TICKS(COMM_TASK_PERIOD_MS);
+    // Respons cepat 10ms (100Hz)
+    const TickType_t xPeriod = pdMS_TO_TICKS(10);
+
+    static bool s_isLinkConnected = false;
 
     for (;;)
     {
-        // 1. Proses paket masuk dari ESP-NOW
+        // 1. Proses SEMUA paket masuk dari ESP-NOW di antrean secara instan
         DroneCommand espCmd = CMD_NONE;
         uint16_t espThrottle = 0;
 
-        if (receiver.processIncomingPacket(espCmd, espThrottle))
+        while (receiver.processIncomingPacket(espCmd, espThrottle))
         {
+            uint32_t now = millis();
             portENTER_CRITICAL(&g_sharedMux);
-            g_sharedState.lastPacketTime = millis();
+            g_sharedState.lastPacketTime = now;
             g_sharedState.hasEverReceived = true;
             if (espThrottle >= PWM_MIN && espThrottle <= THROTTLE_MAX)
             {
@@ -171,7 +174,17 @@ void commTask(void *pvParameters)
             }
             portEXIT_CRITICAL(&g_sharedMux);
 
-            // Deduplikasi event tombol & gestur
+            // Cetak status terhubung HANYA sekali saat transisi dari terputus -> terhubung
+            if (!s_isLinkConnected)
+            {
+                s_isLinkConnected = true;
+                Serial.println();
+                Serial.println("========================================================");
+                Serial.println("[ESP-NOW STATUS] >>> TERHUBUNG dengan Glove Controller! <<<");
+                Serial.println("========================================================");
+            }
+
+            // Deduplikasi & eksekusi cepat perintah tombol & gestur
             if (espCmd == CMD_NONE)
             {
                 s_lastEspCmd = CMD_NONE;
@@ -184,6 +197,12 @@ void commTask(void *pvParameters)
                 {
                     s_lastEspCmd = espCmd;
 
+                    Serial.println();
+                    Serial.println("========================================================");
+                    Serial.printf("[ESP-NOW RECV] DITERIMA DARI CONTROLLER: >>> [ %s ] <<<\n", getDroneCommandName(espCmd));
+                    Serial.printf("               Command ID: %d | Throttle: %d\n", espCmd, espThrottle);
+                    Serial.println("========================================================");
+
                     if (xQueueSend(xQueueCommand, &espCmd, 0) != pdPASS)
                     {
                         Serial.println("[COMM WARN] Queue command penuh! Paket dilewati.");
@@ -192,34 +211,46 @@ void commTask(void *pvParameters)
             }
         }
 
-        // 2. Proses perintah Serial untuk bench testing
-        handleSerialCommands();
+        // Deteksi jika koneksi terputus: HANYA cetak saat transisi dari terhubung -> terputus
+        uint32_t lastPkt = 0;
+        bool hasEver = false;
+        portENTER_CRITICAL(&g_sharedMux);
+        lastPkt = g_sharedState.lastPacketTime;
+        hasEver = g_sharedState.hasEverReceived;
+        portEXIT_CRITICAL(&g_sharedMux);
 
-        // 3. Cetak telemetri periodik non-blocking (10Hz / 100ms) tanpa membebani Core 1
-        if (millis() - s_lastTelemMs >= 100)
+        if (s_isLinkConnected && hasEver && (millis() - lastPkt > ESPNOW_TIMEOUT_MS))
         {
-            s_lastTelemMs = millis();
-
-            TelemetryData t;
-            portENTER_CRITICAL(&g_sharedMux);
-            t = g_sharedState.telemetry;
-            portEXIT_CRITICAL(&g_sharedMux);
-
-            if (t.state != STATE_DISARMED)
-            {
-                Serial.printf("[%s|T:%4d] Tgt(P:%+4.1f R:%+4.1f) IMU(P:%+4.1f R:%+4.1f) Mot(%4d %4d %4d %4d) [dt:%luµs J:%lu]%s%s\n",
-                              getDroneStateName(t.state),
-                              t.throttle,
-                              t.targetPitch, t.targetRoll,
-                              t.currentPitch, t.currentRoll,
-                              t.motorFL, t.motorFR, t.motorRL, t.motorRR,
-                              t.loopDurationUs, t.jitterUs,
-                              t.gestureReady  ? " [READY]"  : "",
-                              t.gestureActive ? " [GESTURE]" : "");
-            }
+            s_isLinkConnected = false;
+            Serial.println();
+            Serial.println("========================================================");
+            Serial.println("[ESP-NOW STATUS] >>> TERPUTUS dari Glove Controller (Signal Timeout)! <<<");
+            Serial.println("========================================================");
         }
 
-        // 4. Delay hingga siklus 20ms (50Hz) berikutnya
+        // 2. Broadcast status drone ke Glove Controller secara periodik (50ms / 20Hz)
+        // Agar lampu hijau pada controller menyala saat ESP-NOW terhubung
+        static uint32_t s_lastStatusTxMs = 0;
+        static uint8_t  s_statusSeq = 0;
+        uint32_t nowMs = millis();
+        if (nowMs - s_lastStatusTxMs >= 50)
+        {
+            s_lastStatusTxMs = nowMs;
+            DroneStatusPacket statusPkt;
+            statusPkt.magic = 0xA5;
+            portENTER_CRITICAL(&g_sharedMux);
+            statusPkt.state = (uint8_t)g_sharedState.droneState;
+            portEXIT_CRITICAL(&g_sharedMux);
+            statusPkt.seq = s_statusSeq++;
+
+            const uint8_t bcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+            esp_now_send(bcastMac, (const uint8_t *)&statusPkt, sizeof(statusPkt));
+        }
+
+        // 3. Proses perintah Serial untuk bench testing
+        handleSerialCommands();
+
+        // 4. Delay responsif 10ms
         vTaskDelayUntil(&xLastWakeTime, xPeriod);
     }
 }

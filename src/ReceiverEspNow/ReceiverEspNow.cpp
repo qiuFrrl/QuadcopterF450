@@ -4,15 +4,16 @@
 
 ReceiverEspNow receiver;
 
-volatile RawPacket ReceiverEspNow::_rawPacket = {{0}, 0};
-volatile bool      ReceiverEspNow::_hasNewRawPacket = false;
+RawPacket          ReceiverEspNow::_rawQueue[RAW_QUEUE_CAPACITY];
+volatile uint8_t   ReceiverEspNow::_qHead = 0;
+volatile uint8_t   ReceiverEspNow::_qTail = 0;
 portMUX_TYPE       ReceiverEspNow::_rawMux = portMUX_INITIALIZER_UNLOCKED;
 uint8_t            ReceiverEspNow::_lastSeq = 0;
 bool               ReceiverEspNow::_hasLastSeq = false;
 
 // ================================================================
-//  CALLBACK: Data masuk dari ESP-NOW (Core 0 WiFi task, bukan ISR)
-//  HANYA menyalin raw bytes ke memory secara atomik, tidak memproses apapun
+//  CALLBACK: Data masuk dari ESP-NOW (Core 0 WiFi task)
+//  Menyimpan ke ring buffer agar tidak ada paket tertimpa / hilang
 // ================================================================
 void IRAM_ATTR ReceiverEspNow::onDataRecv(const uint8_t *mac, const uint8_t *data, int len)
 {
@@ -34,12 +35,16 @@ void IRAM_ATTR ReceiverEspNow::onDataRecv(const uint8_t *mac, const uint8_t *dat
         return;
     }
 
-    int copyLen = (len < (int)sizeof(_rawPacket.data)) ? len : (int)sizeof(_rawPacket.data) - 1;
+    int copyLen = (len < (int)sizeof(_rawQueue[0].data)) ? len : (int)sizeof(_rawQueue[0].data) - 1;
 
     portENTER_CRITICAL(&_rawMux);
-    memcpy((void*)_rawPacket.data, data, copyLen);
-    _rawPacket.len = copyLen;
-    _hasNewRawPacket = true;
+    uint8_t nextHead = (_qHead + 1) % RAW_QUEUE_CAPACITY;
+    if (nextHead != _qTail)
+    {
+        memcpy((void*)_rawQueue[_qHead].data, data, copyLen);
+        _rawQueue[_qHead].len = copyLen;
+        _qHead = nextHead;
+    }
     portEXIT_CRITICAL(&_rawMux);
 }
 
@@ -77,24 +82,28 @@ bool ReceiverEspNow::begin()
     }
 
     esp_now_register_recv_cb(onDataRecv);
-    Serial.println("[ESP-NOW] Receiver aktif & siap menerima paket.");
+
+    // Daftarkan broadcast peer agar drone bisa broadcast DroneStatusPacket ke controller
+    esp_now_peer_info_t bcastPeer = {};
+    memset(bcastPeer.peer_addr, 0xFF, 6);
+    bcastPeer.channel = ESPNOW_WIFI_CHANNEL;
+    bcastPeer.encrypt = false;
+    esp_now_add_peer(&bcastPeer);
+
+    Serial.println("[ESP-NOW] Receiver aktif & siap menerima paket cepat.");
     return true;
 }
 
-// ================================================================
-//  processIncomingPacket — Dipanggil dari commTask (Core 0)
-// ================================================================
 bool ReceiverEspNow::processIncomingPacket(DroneCommand &outCmd, uint16_t &outThrottle)
 {
     RawPacket localPacket;
     bool hasPkt = false;
 
     portENTER_CRITICAL(&_rawMux);
-    if (_hasNewRawPacket)
+    if (_qHead != _qTail)
     {
-        localPacket.len = _rawPacket.len;
-        memcpy(localPacket.data, (const void*)_rawPacket.data, localPacket.len);
-        _hasNewRawPacket = false;
+        localPacket = _rawQueue[_qTail];
+        _qTail = (_qTail + 1) % RAW_QUEUE_CAPACITY;
         hasPkt = true;
     }
     portEXIT_CRITICAL(&_rawMux);
@@ -107,7 +116,7 @@ bool ReceiverEspNow::processIncomingPacket(DroneCommand &outCmd, uint16_t &outTh
     outCmd = CMD_NONE;
     outThrottle = 0;
 
-    // 1. Format Paket Biner V2 dengan Sequence Number (DronePacketV2 — 4 bytes)
+    // 1. Format Paket Biner V2 dengan Sequence Number (DronePacketV2)
     if (localPacket.len == sizeof(DronePacketV2))
     {
         const DronePacketV2 *pkt = (const DronePacketV2 *)localPacket.data;
@@ -115,10 +124,8 @@ bool ReceiverEspNow::processIncomingPacket(DroneCommand &outCmd, uint16_t &outTh
         uint8_t c = pkt->command;
         if ((c >= CMD_MAJU && c <= CMD_KANAN) || (c >= CMD_BTN_ARM_LAND && c <= CMD_BTN_READY))
         {
-            // Cek apakah paket ini duplikat dari sequence yang sama
             if (_hasLastSeq && pkt->seq == _lastSeq)
             {
-                // Sequence identik -> paket retransmisi/duplikat, abaikan event tombol/gesture
                 outCmd = CMD_NONE;
             }
             else
@@ -141,7 +148,7 @@ bool ReceiverEspNow::processIncomingPacket(DroneCommand &outCmd, uint16_t &outTh
         return true;
     }
 
-    // 2. Format Paket Biner Standar (DronePacket — 3 bytes)
+    // 2. Format Paket Biner Standar (DronePacket)
     if (localPacket.len == sizeof(DronePacket))
     {
         const DronePacket *pkt = (const DronePacket *)localPacket.data;
@@ -163,55 +170,5 @@ bool ReceiverEspNow::processIncomingPacket(DroneCommand &outCmd, uint16_t &outTh
         return true;
     }
 
-    // 3. Format Teks String (untuk uji coba / bench test)
-#if ESPNOW_ALLOW_TEXT_PARSER
-    char text[32];
-    int copyLen = min(localPacket.len, (int)(sizeof(text) - 1));
-    memcpy(text, localPacket.data, copyLen);
-    text[copyLen] = '\0';
-
-    for (int i = 0; i < copyLen; i++)
-    {
-        text[i] = toupper((unsigned char)text[i]);
-    }
-
-    // Tombol glove
-    if (strstr(text, "ARM_LAND") || strcmp(text, "T1") == 0)
-    {
-        outCmd = CMD_BTN_ARM_LAND;
-    }
-    else if (strstr(text, "EMERGENCY") || strcmp(text, "T2") == 0 || strcmp(text, "E") == 0)
-    {
-        outCmd = CMD_BTN_EMERGENCY;
-    }
-    else if (strstr(text, "READY") || strcmp(text, "T3") == 0)
-    {
-        outCmd = CMD_BTN_READY;
-    }
-    // Gesture gerak
-    else if (strstr(text, "MAJU") || strcmp(text, "F") == 0)
-    {
-        outCmd = CMD_MAJU;
-    }
-    else if (strstr(text, "MUNDUR") || strcmp(text, "B") == 0)
-    {
-        outCmd = CMD_MUNDUR;
-    }
-    else if (strstr(text, "KIRI") || strcmp(text, "L") == 0)
-    {
-        outCmd = CMD_KIRI;
-    }
-    else if (strstr(text, "KANAN") || strcmp(text, "R") == 0)
-    {
-        outCmd = CMD_KANAN;
-    }
-    else if (strstr(text, "IDLE") || strcmp(text, "I") == 0)
-    {
-        outCmd = CMD_NONE;
-    }
-
     return true;
-#else
-    return false;
-#endif
 }
