@@ -90,8 +90,7 @@
 // -- ESP-NOW & FAILSAFE SETTINGS --
 #define ESPNOW_WIFI_CHANNEL         1      // Kanal WiFi ESP-NOW
 #define GLOVE_MAC_ADDR              {0x00, 0x00, 0x00, 0x00, 0x00, 0x00} // Isi dengan MAC glove; 00 semua = terima semua paket.
-#define ESPNOW_ALLOW_TEXT_PARSER    0      // 0 = hanya paket biner; 1 = aktifkan parser teks untuk bench/debug.
-#define ESPNOW_TIMEOUT_MS           1000   // Failsafe timeout (ms) jika sinyal remote hilang
+#define ESPNOW_TIMEOUT_MS           2000   // Failsafe timeout (ms) jika sinyal remote hilang (2 detik untuk toleransi noise RF)
 // Timeout landing: ceil((THROTTLE_MAX - LANDING_THROTTLE_FLOOR) / 80us/s * 1000) + 2000ms hold ~= 11375ms.
 #define FAILSAFE_LANDING_TIMEOUT_MS 12000  // Waktu maksimum penurunan throttle failsafe sebelum auto-cut motor (ms)
 #define FAILSAFE_FLOOR_HOLD_MS      2000   // Waktu menahan throttle floor sebelum auto-cut motor (ms)

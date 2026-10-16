@@ -51,14 +51,28 @@ void IRAM_ATTR ReceiverEspNow::onDataRecv(const uint8_t *mac, const uint8_t *dat
 bool ReceiverEspNow::begin()
 {
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+
+    // Matikan mode sleep/power save WiFi agar ESP32 tidak mematikan modul RF
+    // (Penyebab utama ESP-NOW sering putus/dropped packet secara berkala)
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    // Kunci kanal WiFi sesuai konfigurasi
     esp_err_t channelResult = esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
     if (channelResult != ESP_OK)
     {
         Serial.printf("[ESP-NOW WARN] Gagal set kanal WiFi %d (err=%d)\n", ESPNOW_WIFI_CHANNEL, channelResult);
     }
-    WiFi.disconnect();
 
-    Serial.printf("[ESP-NOW] MAC Address Drone: %s\n", WiFi.macAddress().c_str());
+    // Naikkan daya pancar WiFi ke level maksimum (19.5 dBm) untuk jangkauan & keandalan sinyal
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+
+    uint8_t primaryChan = 0;
+    wifi_second_chan_t secondChan;
+    esp_wifi_get_channel(&primaryChan, &secondChan);
+
+    Serial.printf("[ESP-NOW] MAC Address Drone : %s\n", WiFi.macAddress().c_str());
+    Serial.printf("[ESP-NOW] WiFi Channel Aktif: %d | Power Save: NONE | Max TX Power: 19.5dBm\n", primaryChan);
 
     const uint8_t gloveMac[6] = GLOVE_MAC_ADDR;
     bool macConfigured = false;

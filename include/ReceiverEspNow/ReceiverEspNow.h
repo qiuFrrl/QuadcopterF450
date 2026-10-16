@@ -6,7 +6,7 @@
 #include "config.h"
 #include "shared/shared_types.h"
 
-#define RAW_QUEUE_CAPACITY 16
+#define RAW_QUEUE_CAPACITY 32
 
 class ReceiverEspNow
 {

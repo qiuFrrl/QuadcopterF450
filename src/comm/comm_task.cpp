@@ -228,12 +228,12 @@ void commTask(void *pvParameters)
             Serial.println("========================================================");
         }
 
-        // 2. Broadcast status drone ke Glove Controller secara periodik (50ms / 20Hz)
-        // Agar lampu hijau pada controller menyala saat ESP-NOW terhubung
+        // 2. Broadcast status drone ke Glove Controller secara periodik (100ms / 10Hz)
+        // Kecepatan 10Hz cukup responsif untuk LED controller tanpa membebani kanal RF (mencegah tabrakan sinyal)
         static uint32_t s_lastStatusTxMs = 0;
         static uint8_t  s_statusSeq = 0;
         uint32_t nowMs = millis();
-        if (nowMs - s_lastStatusTxMs >= 50)
+        if (nowMs - s_lastStatusTxMs >= 100)
         {
             s_lastStatusTxMs = nowMs;
             DroneStatusPacket statusPkt;
